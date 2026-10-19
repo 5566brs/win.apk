@@ -1,3 +1,15 @@
+# Win.apk
+
+**An unofficial port of Mac.apk to Windows on Intel/AMD (x64). Early work in progress.**
+
+Win.apk is based on [Mac.apk](https://github.com/kksimp/Mac.apk) by Kaleb Simpson /
+Voltare. It is not affiliated with or endorsed by the Mac.apk project. The Windows
+port lives in [`windows/`](windows/README.md), which covers the approach, the build
+and the roadmap. Everything below this section is the upstream Mac.apk README,
+kept as is.
+
+---
+
 # Mac.apk
 
 **Run Android apps natively on Apple Silicon Macs. No emulator, no virtual machine, no Linux underneath.**

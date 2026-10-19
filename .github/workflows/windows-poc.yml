@@ -1,0 +1,64 @@
+# Win.apk phase-1 PoC: build the Android x86_64 test libraries on Linux, then
+# build the loader on a real Windows x64 runner and run the checks there.
+name: Windows PoC
+
+on:
+  push:
+    paths:
+      - 'windows/**'
+      - '.github/workflows/windows-poc.yml'
+  pull_request:
+    paths:
+      - 'windows/**'
+      - '.github/workflows/windows-poc.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  guest:
+    name: Android x86_64 test libraries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang + lld
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang lld
+      - name: Build guest .so files
+        run: windows/test/build_guest.sh "$RUNNER_TEMP/guest"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: guest-libs
+          path: ${{ runner.temp }}/guest/*.so
+
+  windows:
+    name: Loader on Windows x64
+    needs: guest
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          pacboy: >-
+            clang:p
+            cmake:p
+            ninja:p
+      - uses: actions/download-artifact@v4
+        with:
+          name: guest-libs
+          path: guest
+      - name: Build winapk-elfrun.exe
+        run: |
+          cmake -S windows -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++
+          cmake --build build
+      - name: Run the PoC checks
+        run: ./build/winapk-elfrun.exe guest/libwinapk_poc_guest.so guest/libwinapk_poc_guest_packed.so
+      - uses: actions/upload-artifact@v4
+        with:
+          name: winapk-elfrun
+          path: build/winapk-elfrun.exe

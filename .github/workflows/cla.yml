@@ -16,6 +16,8 @@ permissions:
 
 jobs:
   cla:
+    # Win.apk: the CLA is the upstream project's; it does not apply in this fork.
+    if: github.repository == 'kksimp/Mac.apk'
     runs-on: ubuntu-latest
     steps:
       - name: CLA Assistant
