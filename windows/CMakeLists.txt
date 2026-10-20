@@ -32,6 +32,7 @@ add_library(winapk_loader STATIC
   src/bionic/pthread.cpp
   src/bionic/stdio.cpp
   src/bionic/misc.cpp
+  src/bionic/locale.cpp
   src/abi_thunk.cpp
   src/linker.cpp
 )

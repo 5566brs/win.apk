@@ -81,7 +81,15 @@ public:
     // a path if it contains a slash or a backslash, else a file name looked up
     // in the search paths. RTLD_NOLOAD and RTLD_GLOBAL are honored. On failure
     // returns nullptr and sets `error` to a bionic-style message.
-    GuestLibrary* open(const std::string& name, int flags, std::string* error);
+    // `placement`, if given, applies to the library itself, not to its
+    // dependencies (android_dlopen_ext's reserved address).
+    struct Placement {
+        void* address = nullptr;
+        size_t size = 0;
+        bool hint = false;  // fall back to anywhere if the range is too small
+    };
+    GuestLibrary* open(const std::string& name, int flags, std::string* error,
+                       const Placement* placement = nullptr);
 
     // What dlopen(nullptr) returns: a handle that searches like RTLD_DEFAULT.
     void* main_handle() const { return main_.get(); }

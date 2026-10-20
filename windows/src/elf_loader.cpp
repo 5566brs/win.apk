@@ -226,7 +226,7 @@ void ElfImage::initialize() {
 ElfImage::~ElfImage() {
     if (initialized_) run_finalizers();
     if (tls_module_) tls_unregister_module(tls_module_);
-    if (mem_) VirtualFree(mem_, 0, MEM_RELEASE);
+    if (mem_ && owns_mem_) VirtualFree(mem_, 0, MEM_RELEASE);
 }
 
 bool ElfImage::in_image(uint64_t vaddr, size_t len) const {
@@ -245,7 +245,24 @@ bool ElfImage::map_segments(const std::vector<uint8_t>& file, std::string* error
     // Reserve and commit the whole span read-write; protect_segments() narrows
     // it per page once relocation is done. Fresh pages are zero, which covers
     // every segment's .bss tail.
-    mem_ = static_cast<uint8_t*>(VirtualAlloc(nullptr, size_, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    if (options_.reserved_address) {
+        if (size_ > options_.reserved_size) {
+            *error = "needs " + std::to_string(size_) + " bytes, the reserved range has " +
+                     std::to_string(options_.reserved_size);
+            return false;
+        }
+        // Committing pages of an existing reservation is allowed whether or not
+        // they are committed already; the caller's old contents are cleared.
+        mem_ = static_cast<uint8_t*>(VirtualAlloc(options_.reserved_address, size_, MEM_COMMIT, PAGE_READWRITE));
+        if (mem_) {
+            DWORD old;
+            VirtualProtect(mem_, size_, PAGE_READWRITE, &old);
+            std::memset(mem_, 0, size_);
+            owns_mem_ = false;
+        }
+    } else {
+        mem_ = static_cast<uint8_t*>(VirtualAlloc(nullptr, size_, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    }
     if (!mem_) {
         *error = "VirtualAlloc(" + std::to_string(size_) + ") failed: " + std::to_string(GetLastError());
         return false;

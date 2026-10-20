@@ -218,7 +218,31 @@ WINAPK_GUEST_ABI size_t g_strftime(char* s, size_t n, const char* fmt, const Gue
     const std::tm t = from_guest_tm(g);
     return std::strftime(s, n, fmt, &t);
 }
-WINAPK_GUEST_ABI void g_tzset() { _tzset(); }
+// tzset fills Bionic's timezone (seconds west of UTC, a 64-bit long), daylight
+// and tzname from the host's zone. Guest code may read them without calling
+// tzset, so they are filled once at startup too.
+glong g_timezone = 0;
+int g_daylight = 0;
+char g_tzname_std[64] = "GMT", g_tzname_dst[64] = "GMT";
+char* g_tzname[2] = {g_tzname_std, g_tzname_dst};
+WINAPK_GUEST_ABI void g_tzset() {
+    _tzset();
+    // From Win32 rather than the CRT's _get_timezone family, which not every
+    // CRT this builds against exports. Bias is in minutes, UTC = local + Bias.
+    TIME_ZONE_INFORMATION tzi;
+    if (GetTimeZoneInformation(&tzi) == TIME_ZONE_ID_INVALID) return;
+    g_timezone = static_cast<glong>(tzi.Bias) * 60;
+    g_daylight = tzi.DaylightDate.wMonth != 0;
+    WideCharToMultiByte(CP_UTF8, 0, tzi.StandardName, -1, g_tzname_std, sizeof(g_tzname_std), nullptr, nullptr);
+    WideCharToMultiByte(CP_UTF8, 0, tzi.DaylightName, -1, g_tzname_dst, sizeof(g_tzname_dst), nullptr, nullptr);
+}
+const bool g_tz_ready = [] {
+    g_tzset();
+    return true;
+}();
+// <netinet/in.h>'s constants: :: and ::1.
+unsigned char g_in6addr_any[16] = {};
+unsigned char g_in6addr_loopback[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
 
 // ---- memory mapping -----------------------------------------------------------------
 // Linux values: PROT_READ 1, WRITE 2, EXEC 4; MAP_SHARED 1, PRIVATE 2, FIXED
@@ -241,6 +265,21 @@ WINAPK_GUEST_ABI void* g_mmap(void* addr, size_t len, int prot, int flags, int f
         return kFailed;
     }
     void* want = (flags & 0x10) ? addr : nullptr;
+    const bool anonymous = (flags & 0x20) || fd < 0;
+    if (prot == 0 && anonymous) {
+        // An address-space reservation (allocators reserve gigabytes this way
+        // and commit pieces with mprotect). Only reserving keeps it off the
+        // commit charge, as Linux's overcommit does.
+        void* r = VirtualAlloc(want, len, MEM_RESERVE, PAGE_NOACCESS);
+        if (!r && want) r = VirtualAlloc(nullptr, len, MEM_RESERVE, PAGE_NOACCESS);
+        if (!r) {
+            *guest_errno() = kENOMEM;
+            return kFailed;
+        }
+        std::lock_guard<std::mutex> hold(g_maps_lock);
+        g_maps[reinterpret_cast<uintptr_t>(r)] = len;
+        return r;
+    }
     // The pages are committed read-write first so a file's contents can be
     // copied in; the requested protection follows.
     void* p = VirtualAlloc(want, len, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
@@ -284,6 +323,9 @@ WINAPK_GUEST_ABI int g_munmap(void* addr, size_t len) {
 }
 WINAPK_GUEST_ABI int g_mprotect(void* addr, size_t len, int prot) {
     DWORD old;
+    // Opening up part of a reservation (see g_mmap) commits it; committing
+    // pages that already are is allowed and only sets the protection.
+    if (prot != 0 && VirtualAlloc(addr, len, MEM_COMMIT, win_protect(prot))) return 0;
     if (VirtualProtect(addr, len, win_protect(prot), &old)) return 0;
     set_errno_from_win32(GetLastError());
     return -1;
@@ -518,6 +560,66 @@ WINAPK_GUEST_ABI int64_t g_getrandom(void* buf, size_t n, unsigned) {
     g_arc4random_buf(buf, n);
     return static_cast<int64_t>(n);
 }
+// ---- syscall(2) ------------------------------------------------------------------------
+// Code that bypasses libc (Chromium's and PartitionAlloc's locks, Rust and Go
+// runtimes, abseil) calls syscall() with x86_64 Linux numbers. The common ones
+// map onto the shim; the rest fail with ENOSYS, which callers expect from an
+// older kernel.
+// futex(2): FUTEX_WAIT and WAIT_BITSET sleep while *uaddr == val (WaitOnAddress
+// wakes on any write to the address, the caller re-checks, as with a spurious
+// futex wakeup); WAKE and WAKE_BITSET wake waiters.
+int64_t guest_futex(uint32_t* uaddr, int op, uint32_t val, const GuestTimespec* ts) {
+    const int cmd = op & 0x7f;  // drop FUTEX_PRIVATE_FLAG and FUTEX_CLOCK_REALTIME
+    if (cmd == 0 || cmd == 9) {  // FUTEX_WAIT, FUTEX_WAIT_BITSET
+        if (*reinterpret_cast<volatile uint32_t*>(uaddr) != val) {
+            *guest_errno() = kEAGAIN;
+            return -1;
+        }
+        DWORD ms = INFINITE;
+        if (ts) {
+            int64_t ns = ts->tv_sec * 1000000000LL + ts->tv_nsec;
+            if (cmd == 9) {  // an absolute deadline on CLOCK_MONOTONIC (or REALTIME with the flag)
+                GuestTimespec now;
+                g_clock_gettime((op & 256) ? 0 : 1, &now);
+                ns -= now.tv_sec * 1000000000LL + now.tv_nsec;
+            }
+            ms = ns <= 0 ? 0 : static_cast<DWORD>((ns + 999999) / 1000000);
+        }
+        if (!WaitOnAddress(uaddr, &val, sizeof(val), ms) && GetLastError() == ERROR_TIMEOUT) {
+            *guest_errno() = kETIMEDOUT;
+            return -1;
+        }
+        return 0;
+    }
+    if (cmd == 1 || cmd == 10) {  // FUTEX_WAKE, FUTEX_WAKE_BITSET
+        if (val == 1) WakeByAddressSingle(uaddr);
+        else WakeByAddressAll(uaddr);
+        return 0;  // the number woken is unknown; callers treat it as a hint
+    }
+    *guest_errno() = kENOSYS;
+    return -1;
+}
+WINAPK_GUEST_ABI int64_t g_syscall(int64_t nr, int64_t a, int64_t b, int64_t c, int64_t d, int64_t e) {
+    switch (nr) {
+        case 202: return guest_futex(reinterpret_cast<uint32_t*>(a), static_cast<int>(b), static_cast<uint32_t>(c),
+                                     reinterpret_cast<const GuestTimespec*>(d));
+        case 186: return static_cast<int64_t>(GetCurrentThreadId());  // gettid
+        case 39: return g_getpid();
+        case 24: SwitchToThread(); return 0;  // sched_yield
+        case 318: return g_getrandom(reinterpret_cast<void*>(a), static_cast<size_t>(b), 0);
+        case 228: return g_clock_gettime(static_cast<int>(a), reinterpret_cast<GuestTimespec*>(b));
+        case 28: return g_madvise(reinterpret_cast<void*>(a), static_cast<size_t>(b), static_cast<int>(c));
+        case 324:  // membarrier: MEMBARRIER_CMD_QUERY answers "no commands", so callers use fences
+            if (a == 0) return 0;
+            *guest_errno() = kENOSYS;
+            return -1;
+        default:
+            (void)e;
+            *guest_errno() = kENOSYS;
+            return -1;
+    }
+}
+
 // rand/random: Bionic's RAND_MAX is 0x7fffffff, the UCRT's 0x7fff.
 uint64_t g_rand_state = 1;
 WINAPK_GUEST_ABI void g_srand(unsigned seed) { g_rand_state = seed; }
@@ -621,6 +723,13 @@ const ShimSymbol kSymbols[] = {
     WINAPK_SHIM("__system_property_read_callback", g_property_read_callback),
     WINAPK_SHIM("__system_property_set", g_property_set),
     WINAPK_SHIM("android_get_device_api_level", g_get_device_api_level),
+    WINAPK_SHIM("syscall", g_syscall),
+    WINAPK_SHIM("strftime_l", g_strftime),
+    {"timezone", &g_timezone},
+    {"daylight", &g_daylight},
+    {"tzname", g_tzname},
+    {"in6addr_any", g_in6addr_any},
+    {"in6addr_loopback", g_in6addr_loopback},
     WINAPK_SHIM("getenv", g_getenv),
     {"environ", &g_environ},
     WINAPK_SHIM("secure_getenv", g_getenv),

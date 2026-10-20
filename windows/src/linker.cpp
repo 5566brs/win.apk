@@ -102,6 +102,12 @@ std::filesystem::path GuestLinker::locate(const std::string& name, const std::fi
         if (std::filesystem::is_regular_file(dir / file, ec)) return dir / file;
     }
     if (!near.empty() && std::filesystem::is_regular_file(near / file, ec)) return near / file;
+    // An app's libraries find each other by bare name: on Android they share
+    // the app namespace, whose search path is the app's library directory.
+    for (const auto& l : libs_) {
+        const std::filesystem::path dir = utf8_path(l->file).parent_path();
+        if (!dir.empty() && std::filesystem::is_regular_file(dir / file, ec)) return dir / file;
+    }
     return {};
 }
 
@@ -128,8 +134,21 @@ void* GuestLinker::find_in(GuestLibrary* lib, const char* name) const {
     return lib->image ? lib->image->dlsym(name) : nullptr;
 }
 
-GuestLibrary* GuestLinker::open(const std::string& name, int flags, std::string* error) {
+// Java code that builds a library's file name with System.mapLibraryName
+// (Chromium's linker, SoLoader) gets the host's "X.dll" where Android gives
+// "libX.so". No guest library is named *.dll, so the Android name is meant.
+static std::string android_library_name(const std::string& name) {
+    const size_t slash = name.find_last_of("/\\");
+    const size_t start = slash == std::string::npos ? 0 : slash + 1;
+    const std::string file = name.substr(start);
+    if (file.size() <= 4 || _stricmp(file.c_str() + file.size() - 4, ".dll") != 0) return name;
+    return name.substr(0, start) + "lib" + file.substr(0, file.size() - 4) + ".so";
+}
+
+GuestLibrary* GuestLinker::open(const std::string& requested, int flags, std::string* error,
+                                const Placement* placement) {
     std::lock_guard<std::recursive_mutex> hold(lock_);
+    const std::string name = android_library_name(requested);
 
     if (GuestLibrary* l = find_loaded(name)) {
         if (flags & kRtldGlobal) l->global = true;
@@ -153,7 +172,16 @@ GuestLibrary* GuestLinker::open(const std::string& name, int flags, std::string*
             return nullptr;
         }
         std::string why;
-        std::unique_ptr<ElfImage> img = ElfImage::map(path, &why, config_.load);
+        std::unique_ptr<ElfImage> img;
+        if (!needed_by && placement && placement->address) {
+            LoadOptions placed = config_.load;
+            placed.reserved_address = placement->address;
+            placed.reserved_size = placement->size;
+            img = ElfImage::map(path, &why, placed);
+            if (!img && placement->hint) img = ElfImage::map(path, &why, config_.load);
+        } else {
+            img = ElfImage::map(path, &why, config_.load);
+        }
         if (!img) {
             *error = "cannot load \"" + path.u8string() + "\": " + why;
             return nullptr;
@@ -347,10 +375,41 @@ WINAPK_GUEST_ABI void* g_dlopen(const char* name, int flags) {
     return lib;
 }
 
-// The extinfo (namespaces, loading from a file descriptor) is not supported;
-// the plain dlopen behavior is what the common callers need.
-WINAPK_GUEST_ABI void* g_android_dlopen_ext(const char* name, int flags, const void* /*extinfo*/) {
-    return g_dlopen(name, flags);
+// bionic's android_dlextinfo (android/dlext.h), LP64.
+struct DlextInfo {
+    uint64_t flags;
+    void* reserved_addr;
+    size_t reserved_size;
+    int relro_fd;
+    int library_fd;
+    int64_t library_fd_offset;
+    void* library_namespace;
+};
+constexpr uint64_t kDlextReservedAddress = 0x1;
+constexpr uint64_t kDlextReservedAddressHint = 0x2;
+
+// Of the extinfo, the reserved address is honored (Chromium's linker loads
+// libchrome.so into a range it reserved, then reads it there). RELRO sharing
+// is skipped: the library keeps its own RELRO, which is still correct.
+// Namespaces and loading from a file descriptor are not supported.
+WINAPK_GUEST_ABI void* g_android_dlopen_ext(const char* name, int flags, const void* extinfo) {
+    const auto* info = static_cast<const DlextInfo*>(extinfo);
+    if (!info || !name || !(info->flags & (kDlextReservedAddress | kDlextReservedAddressHint))) {
+        return g_dlopen(name, flags);
+    }
+    GuestLinker* linker = GuestLinker::process();
+    if (!linker) {
+        set_dlerror("android_dlopen_ext", "no guest linker");
+        return nullptr;
+    }
+    GuestLinker::Placement placement;
+    placement.address = info->reserved_addr;
+    placement.size = info->reserved_size;
+    placement.hint = !(info->flags & kDlextReservedAddress);
+    std::string error;
+    GuestLibrary* lib = linker->open(name, flags, &error, &placement);
+    if (!lib) set_dlerror("android_dlopen_ext", error);
+    return lib;
 }
 
 WINAPK_GUEST_ABI void* g_dlsym(void* handle, const char* name) {

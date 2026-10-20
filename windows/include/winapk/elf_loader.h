@@ -53,6 +53,11 @@ struct LoadOptions {
     // `stderr`): guest code reads through it, so a code stub would be read as
     // data. The runtime binds a block of zeroed memory.
     SymbolResolver unresolved_object;
+    // Load into a range the caller reserved (android_dlopen_ext's
+    // ANDROID_DLEXT_RESERVED_ADDRESS); the image fails to map if it does not
+    // fit. The range stays the caller's: the image does not free it.
+    void* reserved_address = nullptr;
+    size_t reserved_size = 0;
 };
 
 class ElfImage {
@@ -135,6 +140,7 @@ private:
     }
 
     uint8_t* mem_ = nullptr;
+    bool owns_mem_ = true;    // false when loaded into a caller's reserved range
     size_t size_ = 0;
     uintptr_t bias_ = 0;     // runtime address = bias_ + ELF vaddr
     uint64_t lo_vaddr_ = 0;  // page-aligned lowest PT_LOAD vaddr

@@ -41,6 +41,7 @@ ShimTable printf_symbols();   // printf.cpp: the printf family and liblog's form
 ShimTable pthread_symbols();  // pthread.cpp: threads, mutexes, conditions, keys, once
 ShimTable stdio_symbols();    // stdio.cpp: FILE, file descriptors, directories, stat
 ShimTable misc_symbols();     // misc.cpp: time, sysconf, system properties, environment, math
+ShimTable locale_symbols();   // locale.cpp: <locale.h>, UTF-8 conversion, <wctype.h>, more <wchar.h>
 
 // ---- errno ------------------------------------------------------------------
 

@@ -477,6 +477,29 @@ WINAPK_GUEST_ABI int g_setname_np(Thread* t, const char* name) {
     set(t->handle, w);
     return 0;
 }
+// prctl(2): the options apps use at startup. PR_SET_NAME names the calling
+// thread (Linux keeps 15 characters); PR_SET_VMA (naming anonymous memory) and
+// the process-wide flags are accepted and have no effect here.
+thread_local char t_prctl_name[16];
+WINAPK_GUEST_ABI int g_prctl(int option, uint64_t a2, uint64_t, uint64_t, uint64_t) {
+    switch (option) {
+        case 15:  // PR_SET_NAME
+            std::strncpy(t_prctl_name, reinterpret_cast<const char*>(a2), 15);
+            t_prctl_name[15] = '\0';
+            g_setname_np(self_record(), t_prctl_name);
+            return 0;
+        case 16:  // PR_GET_NAME
+            std::memcpy(reinterpret_cast<char*>(a2), t_prctl_name, 16);
+            return 0;
+        case 3: return 1;  // PR_GET_DUMPABLE
+        case 1: case 4: case 29: case 36: case 38: case 0x53564d41: return 0;
+        // PR_SET_PDEATHSIG, PR_SET_DUMPABLE, PR_SET_TIMERSLACK,
+        // PR_SET_CHILD_SUBREAPER, PR_SET_NO_NEW_PRIVS, PR_SET_VMA
+        default:
+            *guest_errno() = kEINVAL;
+            return -1;
+    }
+}
 WINAPK_GUEST_ABI int g_getname_np(Thread*, char* buf, size_t n) {
     if (n) buf[0] = '\0';
     return 0;
@@ -613,6 +636,7 @@ const ShimSymbol kSymbols[] = {
     WINAPK_SHIM("pthread_exit", g_exit),
     WINAPK_SHIM("pthread_gettid_np", g_pthread_gettid_np),
     WINAPK_SHIM("pthread_setname_np", g_setname_np),
+    WINAPK_SHIM("prctl", g_prctl),
     WINAPK_SHIM("pthread_getname_np", g_getname_np),
     WINAPK_SHIM("pthread_getattr_np", g_getattr_np),
     WINAPK_SHIM("pthread_kill", g_kill),

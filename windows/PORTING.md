@@ -137,7 +137,7 @@ Everything in this section is merged on `main` and tested in CI on
 | `src/elf_loader.cpp` | Loads Android x86_64 shared objects: copies PT_LOAD segments; applies RELA, RELR (`DT_RELR` and `DT_ANDROID_RELR`) and Android APS2 packed relocations; sets per-page protections; resolves IRELATIVE; seals PT_GNU_RELRO; runs `DT_INIT` and `DT_INIT_ARRAY`; looks up exports and the symbol covering an address. The map, link and initialize phases can run separately |
 | `src/linker.cpp` | The guest linker: loads a library with its `DT_NEEDED` tree in bionic's order (map all, link all, constructors dependencies first), answers system libraries from the shim, keeps the registry of loaded images, and provides the guest's `dlopen`, `android_dlopen_ext`, `dlsym` (with `RTLD_DEFAULT` and `RTLD_NEXT`), `dlclose`, `dlerror` and `dladdr` |
 | `src/fs_tls_patch.cpp` | Rewrites Bionic stack-guard loads (`%fs:0x28`) to `%gs:0x28` |
-| `src/mini_bionic.cpp`, `src/bionic/` | The Windows Bionic shim. `mini_bionic.cpp` holds the core (malloc family, `__stack_chk_fail`, `__cxa_atexit`, `qsort` with a guest comparator, Linux `errno` translation from the UCRT and Win32) and merges the module tables: `string.cpp` (string.h, ctype, 32-bit `wchar_t`, `strto*`, FORTIFY `_chk`), `printf.cpp` (a printf engine reading the System V `va_list`, the printf family and liblog's variadic calls), `pthread.cpp` (futex-style mutexes, condition variables, rwlocks, once, keys and threads on `WaitOnAddress` over bionic's struct layouts, plus semaphores), `stdio.cpp` (file descriptors, `stat` in bionic's layout, directories, `FILE`) and `misc.cpp` (clocks and time, `mmap` on `VirtualAlloc`, system properties, the guest environment, `sysconf`, `uname`, `getauxval`, `arc4random`, libm) |
+| `src/mini_bionic.cpp`, `src/bionic/` | The Windows Bionic shim. `mini_bionic.cpp` holds the core (malloc family, `__stack_chk_fail`, `__cxa_atexit`, `qsort` with a guest comparator, Linux `errno` translation from the UCRT and Win32) and merges the module tables: `string.cpp` (string.h, ctype, 32-bit `wchar_t`, `strto*`, FORTIFY `_chk`), `printf.cpp` (a printf engine reading the System V `va_list`, the printf family and liblog's variadic calls), `pthread.cpp` (futex-style mutexes, condition variables, rwlocks, once, keys and threads on `WaitOnAddress` over bionic's struct layouts, plus semaphores), `stdio.cpp` (file descriptors, `stat` in bionic's layout, directories, `FILE`), `locale.cpp` (the C and C.UTF-8 locales libc++ builds on, UTF-8 conversion, `<wctype.h>`, more `<wchar.h>`; the `*_l` functions are aliases) and `misc.cpp` (clocks and time, `mmap` on `VirtualAlloc` with `PROT_NONE` as a reservation, system properties, the guest environment and `environ`, `syscall` for futex and friends, `sysconf`, `uname`, `getauxval`, `arc4random`, libm) |
 | `src/abi_thunk.cpp` | Small x86-64 code emitter. Produces native-method thunks (Microsoft x64 caller to System V guest, built from a Java signature, swapping in the guest `JNIEnv*`) and System V variadic entry stubs |
 | `tools/gen_jni_slots.py`, `src/jni_slots.inc` | Generated list of the 235 `JNINativeInterface_` slots, each tagged as plain, variadic or `va_list`, with the matching `...A` slot for the variadic ones |
 | `src/guest_jni.cpp` | Guest `JNIEnv` and `JavaVM`: one shared System V table that forwards into HotSpot, a guest env per thread, and `GetEnv`, `AttachCurrentThread` and `DetachCurrentThread` |
@@ -163,7 +163,7 @@ Everything in this section is merged on `main` and tested in CI on
 | `winapk-jni-test` | The guest `JNIEnv` forwards correctly against a mock JVM, for several return types and argument shapes, and `JavaVM::GetEnv` hands back a guest env |
 | `winapk-jni-variadic-test` | The variadic bridge works for all four call kinds (virtual, static, nonvirtual, `NewObject`), for int, long, object, float and double arguments, through both `...` and `va_list` |
 | `winapk-linker-test` | A four-library tree (root, a `DT_NEEDED` cycle between two libraries, and a plugin opened at runtime) loads through the linker: constructors run dependencies first, symbols resolve across the cycle, `dlsym` on a library finds its dependencies' symbols, the registry tells guest from host addresses, and the guest's `dlopen`, `dlsym`, `dlerror` and `dladdr` behave like bionic's |
-| `winapk-bionic-test` | `test/guest/bionic_guest.c` exercises the shim from guest code: string and ctype functions, `strerror` with Linux numbering, `snprintf` through the System V `va_list` (integers, floats, strings, `%n`, `*` widths), mutexes, condition variables and threads, keys with destructors, files and `stat`, directories, `FILE` I/O, ELF TLS across threads (`.tdata` and `.tbss`, local- and general-dynamic), system properties, `setenv`/`getenv`, clocks, `mmap` and `sysconf` |
+| `winapk-bionic-test` | `test/guest/bionic_guest.c` exercises the shim from guest code: string and ctype functions, `strerror` with Linux numbering, `snprintf` through the System V `va_list` (integers, floats, strings, `%n`, `*` widths), mutexes, condition variables and threads, keys with destructors, files and `stat`, directories, `FILE` I/O, ELF TLS across threads (`.tdata` and `.tbss`, local- and general-dynamic), system properties, UTF-8 conversion and locales, `syscall` (futex wait, wake and timeout), an 8 GiB `PROT_NONE` reservation opened by `mprotect`, `environ`, `setenv`/`getenv`, clocks, `mmap` and `sysconf` |
 | `winapk-jvm-run` | With a real HotSpot JVM: a library loaded through the linker runs its `JNI_OnLoad`, which registers `nativeMix` through the guest `RegisterNatives`; `nativeAdd` is handed to HotSpot as a raw guest address and the `NativeMethodBind` hook has to replace it. Both are called from Java, and `nativeAdd` calls back into Java through a variadic `CallStaticIntMethod`. `nativeAdd(3, 4)` must return 19 |
 | Headless boot (CI) | `winapk-runtime` boots the F-Droid Sudoku APK on `windows-latest`: DEX conversion, `Application.onCreate`, the first activity resumed, and 30 frames presented. The log and the last frame are a CI artifact |
 
@@ -234,7 +234,7 @@ implements in `runtime/src`; on Windows `windows/host/native_*.cpp`):
 |---|---|---|---|---|
 | `arm64_native.cpp`, `arm64_pack.cpp`, `arm64_macho_emit.cpp` | 17,585 | load arm64 `.so` on Apple Silicon | `src/elf_loader.cpp`, `src/linker.cpp`, `host/guest_libs.cpp` (x86_64) | done; dynamic ELF TLS done, static TLS missing |
 | `main.cpp` (translator CLI) | 9,744 | `.so` to a host library | `host/translator_main.cpp` + `host/guest_stub.cpp` | done |
-| `bionic_shim.cpp` | 66,962 | Android's libc, libdl, liblog, libm, libandroid... on Darwin | `src/mini_bionic.cpp` and `src/bionic/` on the Windows CRT and Win32 (M5) | about 370 functions |
+| `bionic_shim.cpp` | 66,962 | Android's libc, libdl, liblog, libm, libandroid... on Darwin | `src/mini_bionic.cpp` and `src/bionic/` on the Windows CRT and Win32 (M5) | about 500 functions |
 | `bionic_shim_jni_bare.cpp`, `_jni_cxxwrap.cpp` | 1,119 | variadic JNI calls | `src/jni_variadic.cpp` | done |
 | `bionic_shim_sigchain.cpp`, `_signal.cpp` | 1,913 | signals and chaining with the JVM | vectored exception handling (M5) | not started |
 | `bionic_shim_sensors.cpp` | 540 | NDK sensors | port as is (M5) | not started |
@@ -437,7 +437,22 @@ nobody has to find them again.
   shadow calls between the app's own libraries. It is the ELF loader's last
   resort instead (`LoadOptions::unresolved`), for non-weak symbols only.
 - Chrome 155's small `libchromium_android_linker.so` was the first real app
-  library to load and run its `JNI_OnLoad`; `libchrome.so` needs ELF TLS.
+  library to load and run its `JNI_OnLoad`. With dynamic TLS, `libchrome.so`
+  (231 MB mapped) loads and initializes too. What it needed after that is
+  typical of large native code: `syscall(SYS_futex)` for its own locks, an
+  8 GiB `PROT_NONE` reservation for PartitionAlloc (committed piecewise by
+  `mprotect`, so `mmap` must only reserve), the libc++ locale functions, a
+  real `environ`, and `android_dlopen_ext`'s reserved address (Chromium's
+  linker asks for 192 MB, less than the library needs, so it falls back to
+  `System.loadLibrary`, as on a device). It now stops at the ICU data file
+  descriptor Java hands to native code: Java and the shim need one
+  file-descriptor table.
+- Java's `System.mapLibraryName` gives "X.dll" on Windows; code that builds
+  library names with it (Chromium's linker, SoLoader) then asks the guest
+  `dlopen` for "X.dll". The linker reads that as "libX.so".
+- A missing system *variable* must not get the reporting code stub: guest
+  code reads through it (SDL walks `environ`) and gets machine code as data.
+  Missing `STT_OBJECT` imports are bound to zeroed memory and logged.
 - Under Wine, a window needs an X display. `Xvfb :99` plus `xdotool` (clicks,
   keys) and ImageMagick's `import -window root` (screenshots) are enough to
   drive an app from a script.

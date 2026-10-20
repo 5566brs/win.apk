@@ -242,7 +242,8 @@ void* mini_bionic_resolve(const char* name) {
         };
         add(kSymbols, sizeof(kSymbols) / sizeof(kSymbols[0]));
         for (ShimTable t : {bionic::string_symbols(), bionic::printf_symbols(), bionic::pthread_symbols(),
-                            bionic::stdio_symbols(), bionic::misc_symbols()}) {
+                            bionic::stdio_symbols(), bionic::misc_symbols(),
+                            bionic::locale_symbols()}) {
             add(t.symbols, t.count);
         }
         return m;

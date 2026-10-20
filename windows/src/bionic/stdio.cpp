@@ -155,6 +155,13 @@ WINAPK_GUEST_ABI int64_t g_read_chk(int fd, void* buf, size_t n, size_t bn) {
     }
     return g_read(fd, buf, n);
 }
+WINAPK_GUEST_ABI int64_t g_write_chk(int fd, const void* buf, size_t n, size_t bn) {
+    if (n > bn) {
+        std::fprintf(stderr, "[win.apk] guest FORTIFY: write: prevented buffer over-read\n");
+        std::abort();
+    }
+    return g_write(fd, buf, n);
+}
 WINAPK_GUEST_ABI int g_dup(int fd) {
     const int r = _dup(fd);
     return r < 0 ? fail_crt() : r;
@@ -451,6 +458,7 @@ const ShimSymbol kSymbols[] = {
     WINAPK_SHIM("close", g_close),
     WINAPK_SHIM("read", g_read),
     WINAPK_SHIM("__read_chk", g_read_chk),
+    WINAPK_SHIM("__write_chk", g_write_chk),
     WINAPK_SHIM("write", g_write),
     WINAPK_SHIM("lseek", g_lseek),
     WINAPK_SHIM("lseek64", g_lseek),

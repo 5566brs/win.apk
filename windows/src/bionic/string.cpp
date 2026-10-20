@@ -82,6 +82,15 @@ WINAPK_GUEST_ABI char* g_strndup(const char* s, size_t n) {
 WINAPK_GUEST_ABI int g_strcasecmp(const char* a, const char* b) { return _stricmp(a, b); }
 WINAPK_GUEST_ABI int g_strncasecmp(const char* a, const char* b, size_t n) { return _strnicmp(a, b, n); }
 WINAPK_GUEST_ABI int g_strcoll(const char* a, const char* b) { return std::strcmp(a, b); }  // C locale
+WINAPK_GUEST_ABI size_t g_strxfrm(char* d, const char* s, size_t n) {  // C locale: a copy
+    const size_t len = std::strlen(s);
+    if (n > 0) {
+        const size_t copy = len < n ? len : n - 1;
+        std::memcpy(d, s, copy);
+        d[copy] = 0;
+    }
+    return len;
+}
 WINAPK_GUEST_ABI char* g_strtok_r(char* s, const char* d, char** save) { return strtok_s(s, d, save); }
 WINAPK_GUEST_ABI char* g_strtok(char* s, const char* d) {
     static thread_local char* save = nullptr;
@@ -431,6 +440,32 @@ const ShimSymbol kSymbols[] = {
     WINAPK_SHIM("__strchr_chk", g_strchr_chk),
     WINAPK_SHIM("__strrchr_chk", g_strrchr_chk),
     WINAPK_SHIM("__memchr_chk", g_memchr_chk),
+    WINAPK_SHIM("strxfrm", g_strxfrm),
+    // The _l variants (locale.cpp explains): the locale argument comes last
+    // and is ignored.
+    WINAPK_SHIM("strcoll_l", g_strcoll),
+    WINAPK_SHIM("strxfrm_l", g_strxfrm),
+    WINAPK_SHIM("strtol_l", g_strtol),
+    WINAPK_SHIM("strtoul_l", g_strtoul),
+    WINAPK_SHIM("strtoll_l", g_strtoll),
+    WINAPK_SHIM("strtoull_l", g_strtoull),
+    WINAPK_SHIM("strtod_l", g_strtod),
+    WINAPK_SHIM("strtof_l", g_strtof),
+    WINAPK_SHIM("strtold_l", g_strtold),
+    WINAPK_SHIM("isalnum_l", g_isalnum),
+    WINAPK_SHIM("isalpha_l", g_isalpha),
+    WINAPK_SHIM("isdigit_l", g_isdigit),
+    WINAPK_SHIM("isxdigit_l", g_isxdigit),
+    WINAPK_SHIM("islower_l", g_islower),
+    WINAPK_SHIM("isupper_l", g_isupper),
+    WINAPK_SHIM("isspace_l", g_isspace),
+    WINAPK_SHIM("isprint_l", g_isprint),
+    WINAPK_SHIM("isgraph_l", g_isgraph),
+    WINAPK_SHIM("ispunct_l", g_ispunct),
+    WINAPK_SHIM("iscntrl_l", g_iscntrl),
+    WINAPK_SHIM("isblank_l", g_isblank),
+    WINAPK_SHIM("tolower_l", g_tolower),
+    WINAPK_SHIM("toupper_l", g_toupper),
 };
 
 }  // namespace

@@ -83,6 +83,8 @@ char* getenv(const char*);
 int setenv(const char*, const char*, int);
 void* mmap(void*, size_t, int, int, int, long);
 int munmap(void*, size_t);
+int mprotect(void*, size_t, int);
+extern char** environ;
 long sysconf(int);
 
 #define EXPORT __attribute__((visibility("default")))
@@ -209,6 +211,42 @@ static void test_tls(void) {
     check("TLS of the main thread is untouched by other threads", t_hidden == 100 && t_exported == 22, 0);
 }
 
+// UTF-8 conversion, locales and raw syscalls (libc++ and Chromium use them).
+size_t mbrtowc(wchar_t*, const char*, size_t, void*);
+size_t wcrtomb(char*, wchar_t, void*);
+size_t mbstowcs(wchar_t*, const char*, size_t);
+char* setlocale(int, const char*);
+void* newlocale(int, const char*, void*);
+void* uselocale(void*);
+long syscall(long, ...);
+int gettid(void);
+struct futex_timespec { long tv_sec, tv_nsec; };
+
+static void test_locale_and_syscall(void) {
+    wchar_t c = 0;
+    unsigned st = 0;
+    check("mbrtowc decodes a 3-byte UTF-8 character", mbrtowc(&c, "\xe2\x82\xac!", 4, &st) == 3 && c == 0x20ac, 0);
+    st = 0;
+    int partial = mbrtowc(&c, "\xe2", 1, &st) == (size_t)-2;
+    check("mbrtowc continues a split sequence", partial && mbrtowc(&c, "\x82\xac", 2, &st) == 2 && c == 0x20ac, 0);
+    check("mbrtowc rejects an illegal byte", mbrtowc(&c, "\xff", 1, 0) == (size_t)-1 && *__errno() == 84, 0);
+    char b[8] = {0};
+    check("wcrtomb encodes U+1F600 as 4 bytes",
+          wcrtomb(b, 0x1f600, 0) == 4 && (unsigned char)b[0] == 0xf0 && (unsigned char)b[3] == 0x80, 0);
+    wchar_t w[8];
+    check("mbstowcs converts a string", mbstowcs(w, "a\xc3\xa9z", 8) == 3 && w[1] == 0xe9 && w[3] == 0, 0);
+    void* loc = newlocale(63, "C", 0);
+    check("setlocale and newlocale/uselocale for C and C.UTF-8",
+          setlocale(6, "") != 0 && loc != 0 && uselocale(loc) == (void*)-1 && uselocale(0) == loc, 0);
+    check("syscall(gettid)", syscall(186) == gettid(), 0);
+    unsigned word = 5;
+    struct futex_timespec ts = {0, 2000000};
+    check("futex WAIT on a changed value fails with EAGAIN", syscall(202, &word, 128, 4, 0) == -1 && *__errno() == 11, 0);
+    check("futex WAIT times out with ETIMEDOUT", syscall(202, &word, 128, 5, &ts) == -1 && *__errno() == 110, 0);
+    check("futex WAKE succeeds", syscall(202, &word, 129, 1) >= 0, 0);
+    check("an unknown syscall fails with ENOSYS", syscall(9999) == -1 && *__errno() == 38, 0);
+}
+
 static void test_threads(void) {
     pthread_key_create(&g_key, key_dtor);
     pthread_t t[4];
@@ -285,6 +323,16 @@ static void test_misc(void) {
     char* m = mmap(0, 65536, 3, 0x22, -1, 0);  // PROT_READ|WRITE, MAP_PRIVATE|ANONYMOUS
     check("mmap anonymous is zeroed and writable", m != (char*)-1 && m[100] == 0 && (m[100] = 7) == 7, 0);
     munmap(m, 65536);
+    // An allocator-style reservation: 8 GiB of PROT_NONE, then one piece
+    // opened with mprotect.
+    char* big = mmap(0, 1UL << 33, 0, 0x22, -1, 0);
+    int opened = big != (char*)-1 && mprotect(big + (1UL << 32), 65536, 3) == 0;
+    if (opened) big[(1UL << 32) + 10] = 5;
+    check("mmap reserves 8 GiB with PROT_NONE; mprotect commits a piece", opened && big[(1UL << 32) + 10] == 5, 0);
+    if (big != (char*)-1) munmap(big, 1UL << 33);
+    int found = 0;
+    for (char** e = environ; e && *e; ++e) found |= strcmp(*e, "WINAPK_TEST=yes") == 0;
+    check("environ lists the guest environment", found, 0);
     check("sysconf(_SC_PAGESIZE)", sysconf(0x27) == 4096, 0);
 }
 
@@ -294,6 +342,7 @@ EXPORT int bionic_test(const char* dir) {
     test_strings();
     test_threads();
     test_tls();
+    test_locale_and_syscall();
     test_files(dir);
     test_misc();
     return failures;
