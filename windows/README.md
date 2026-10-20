@@ -122,6 +122,9 @@ Windows hook is unavoidable, and every such change is listed here:
 - `runtime/java/android/widget/RatingBar.java` and `ProgressBar.java`: a rating
   bar reads `numStars`, `rating`, `stepSize` and `isIndicator` from XML and
   measures one row of stars, as AOSP does. Not Windows-specific.
+- `runtime/java/android/database/sqlite/SQLiteDatabase.java`: `BEGIN`,
+  `COMMIT` and `ROLLBACK` given to `execSQL` nest in the transaction stack, as
+  AOSP's `SQLiteSession.executeSpecial` does. Not Windows-specific.
 
 ## License
 

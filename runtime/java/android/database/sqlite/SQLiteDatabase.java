@@ -205,7 +205,27 @@ public class SQLiteDatabase extends SQLiteClosable {
 
     private void executeSql(String sql, Object[] bindArgs) {
         // Dereferences sql: a null statement NPEs here, exactly as AOSP does.
-        DatabaseUtils.getSqlStatementType(sql);
+        int type = DatabaseUtils.getSqlStatementType(sql);
+        // AOSP never hands BEGIN / COMMIT / ROLLBACK to SQLite: its session
+        // maps them onto its own transaction stack (SQLiteSession.executeSpecial),
+        // so they nest. A migration script that wraps itself in "BEGIN
+        // TRANSACTION; ... COMMIT;" therefore works inside the transaction
+        // SQLiteOpenHelper opens around onCreate/onUpgrade, where a raw BEGIN
+        // fails with "cannot start a transaction within a transaction".
+        switch (type) {
+            case DatabaseUtils.STATEMENT_BEGIN:
+                beginTransaction();
+                return;
+            case DatabaseUtils.STATEMENT_COMMIT:
+                setTransactionSuccessful();
+                endTransaction();
+                return;
+            case DatabaseUtils.STATEMENT_ABORT:
+                endTransaction();
+                return;
+            default:
+                break;
+        }
         long stmt = NativeSqlite.nativePrepare(dbHandle, sql);
         if (stmt == 0) {
             throw new SQLiteException("prepare failed: "

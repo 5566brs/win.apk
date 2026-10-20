@@ -317,6 +317,12 @@ nobody has to find them again.
   `onMeasure`, so it drew as a grid of stars filling its box. Fixed here
   (listed in `README.md`). The rating bar style's `maxHeight` is not read
   yet, so the height is the star drawable's own.
+- Upstream's `SQLiteDatabase.execSQL` passed `BEGIN` and `COMMIT` straight to
+  SQLite. AOSP maps them onto its own transaction stack, so they nest. Loop
+  Habits runs a migration script that opens its own transaction inside the one
+  `SQLiteOpenHelper` holds around `onCreate`, and its `Application.onCreate`
+  died with "cannot start a transaction within a transaction". Fixed here
+  (listed in `README.md`).
 - Under Wine, a window needs an X display. `Xvfb :99` plus `xdotool` (clicks,
   keys) and ImageMagick's `import -window root` (screenshots) are enough to
   drive an app from a script.
