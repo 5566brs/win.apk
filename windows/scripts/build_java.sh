@@ -36,6 +36,15 @@ else
     JAR=jar
 fi
 
+# javac reads the @file lists itself, so on MSYS2, where only command-line
+# arguments are translated to Windows paths, the lists need Windows paths.
+native_paths() {
+    if command -v cygpath > /dev/null 2>&1; then cygpath -m -f -; else cat; fi
+}
+# The same for a path inside an argument ("module=path"), which MSYS2 does not
+# always recognize.
+native_path() { printf '%s\n' "$1" | native_paths; }
+
 # A stale class from a deleted source would otherwise ship forever; javac
 # recompiles everything anyway, so wiping costs nothing.
 rm -rf "$TMP"
@@ -45,7 +54,7 @@ echo "[build_java] compiling runtime/java..."
 LIST="$WORK/java.list"
 # Paths go into an @file, which splits on spaces; upstream skips Finder
 # conflict copies ("Foo 2.java") the same way.
-find "$RT/java" -name '*.java' ! -path '* [2-9].java' | sort > "$LIST"
+find "$RT/java" -name '*.java' ! -path '* [2-9].java' | sort | native_paths > "$LIST"
 # Upstream's sources produce a few dozen warnings (sun.misc.Unsafe use) that
 # -nowarn does not silence, so the output goes to a log shown only on failure.
 if ! "$JAVAC" -J-Xmx2g -d "$TMP" --release 21 -nowarn -Xlint:-options @"$LIST" > "$WORK/javac.log" 2>&1; then
@@ -57,7 +66,7 @@ fi
 # The resolver provider is a separate pass: it needs the running JDK's API
 # rather than --release 21.
 if [[ -d "$RT/net_spi" ]]; then
-    find "$RT/net_spi" -name '*.java' ! -path '* [2-9].java' | sort > "$WORK/net_spi.list"
+    find "$RT/net_spi" -name '*.java' ! -path '* [2-9].java' | sort | native_paths > "$WORK/net_spi.list"
     if [[ -s "$WORK/net_spi.list" ]]; then
         "$JAVAC" -d "$TMP" -nowarn -Xlint:-options @"$WORK/net_spi.list"
     fi
@@ -74,8 +83,8 @@ patch_module() {  # patch_module <module> <source dir> <out dir>
     echo "[build_java] compiling ${src#"$RT"/} (--patch-module $module)..."
     rm -rf "$dst"
     mkdir -p "$dst"
-    find "$src" -name '*.java' | sort > "$WORK/$module.list"
-    "$JAVAC" -nowarn --patch-module "$module=$src" -d "$dst" @"$WORK/$module.list"
+    find "$src" -name '*.java' | sort | native_paths > "$WORK/$module.list"
+    "$JAVAC" -nowarn --patch-module "$module=$(native_path "$src")" -d "$dst" @"$WORK/$module.list"
 }
 patch_module java.base "$RT/java_base_patch" "$LIB/java_base_patch"
 patch_module jdk.unsupported "$RT/jdk_unsupported_patch" "$LIB/jdk_unsupported_patch"
