@@ -42,14 +42,18 @@ def main(path):
             sys.exit("cannot parse slot %d: %s" % (index, d))
         name = name.group(1)
         call = CALL_RE.match(name)
-        if "..." in d:
-            kind = "NewObject" if call.group(3) else (call.group(1) or "Virtual")
-            rtype = "Object" if call.group(3) else call.group(2)
-            out.append("WINAPK_JNI_CALL(%s, %s, %s)" % (name, kind, rtype))
-        elif "va_list" in d:
-            kind = "NewObject" if call.group(3) else (call.group(1) or "Virtual")
-            rtype = "Object" if call.group(3) else call.group(2)
-            out.append("WINAPK_JNI_CALLV(%s, %s, %s)" % (name, kind, rtype))
+        variadic = "..." in d
+        valist = "va_list" in d
+        if variadic or valist:
+            # The matching ...A form takes a jvalue[] instead of varargs: the V
+            # variant's name minus its trailing V, plus A (NewObjectV -> NewObjectA).
+            base = name[:-1] if valist else name
+            aform = base + "A"
+            # Named integer arguments before the varargs, including JNIEnv*:
+            # (env, obj, clazz, mid) for Nonvirtual = 4, otherwise (env, _, mid) = 3.
+            named = 4 if call.group(1) == "Nonvirtual" else 3
+            macro = "WINAPK_JNI_CALLV" if valist else "WINAPK_JNI_CALL"
+            out.append("%s(%s, %s, %d)" % (macro, name, aform, named))
         else:
             out.append("WINAPK_JNI_PLAIN(%s)" % name)
     print("\n".join(out))

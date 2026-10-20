@@ -51,14 +51,19 @@ endif()
 # JDK-free, so the elf-loader and thunk targets build without a JDK.
 set(WINAPK_JNI_INCLUDE "" CACHE PATH "JDK include dir (contains jni.h and win32/jni_md.h)")
 if(WINAPK_JNI_INCLUDE)
-  add_library(winapk_jni STATIC src/guest_jni.cpp)
+  add_library(winapk_jni STATIC src/guest_jni.cpp src/jni_variadic.cpp)
   target_include_directories(winapk_jni PUBLIC include "${WINAPK_JNI_INCLUDE}" "${WINAPK_JNI_INCLUDE}/win32")
   target_link_libraries(winapk_jni PUBLIC winapk_loader)
 
   add_executable(winapk-jni-test test/jni_wrapper_test.cpp)
   target_link_libraries(winapk-jni-test PRIVATE winapk_jni)
+
+  add_executable(winapk-jni-variadic-test test/jni_variadic_test.cpp)
+  target_link_libraries(winapk-jni-variadic-test PRIVATE winapk_jni)
+
   if(MINGW)
     target_link_options(winapk-jni-test PRIVATE -static)
+    target_link_options(winapk-jni-variadic-test PRIVATE -static)
   endif()
 else()
   message(STATUS "WINAPK_JNI_INCLUDE not set; skipping the JNI wrapper target (winapk_jni, winapk-jni-test)")

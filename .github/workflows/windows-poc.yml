@@ -65,6 +65,8 @@ jobs:
         run: ./build/winapk-thunk-test.exe
       - name: Run the JNI wrapper test
         run: ./build/winapk-jni-test.exe
+      - name: Run the variadic JNI bridge test
+        run: ./build/winapk-jni-variadic-test.exe
       - name: Run the PoC checks
         run: ./build/winapk-elfrun.exe guest/libwinapk_poc_guest.so guest/libwinapk_poc_guest_packed.so
       - uses: actions/upload-artifact@v4

@@ -29,7 +29,15 @@
 
 #include <jni.h>
 
+#include "winapk/jni_variadic.h"
+
 namespace winapk {
+
+// Registers the method-signature provider the variadic Call<T>Method bridge
+// needs, and installs those bridges into the guest table. Until this is set,
+// the variadic slots are a loud-abort stub. Safe to call before or after
+// guest_jni_init.
+void guest_jni_set_signature_provider(SignatureProvider provider, void* ctx);
 
 // Binds the guest view to a host JavaVM. Call once, after JNI_CreateJavaVM.
 // `host_vm` is HotSpot's JavaVM*. Returns the guest JavaVM* to hand to guest

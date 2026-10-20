@@ -46,6 +46,8 @@ GuestVM g_guest_vm;
 JNINativeInterface_ g_guest_table;      // filled by build_guest_table()
 JNIInvokeInterface_ g_guest_invoke;     // filled by guest_jni_init()
 bool g_table_built = false;             // init runs once at startup, before threads
+SignatureProvider g_sig_provider = nullptr;
+void* g_sig_ctx = nullptr;
 
 // One guest env per thread. Its address is stable for the thread's life, which
 // is what lets it be handed out as a JNIEnv*.
@@ -167,6 +169,7 @@ JavaVM* guest_jni_init(JavaVM* host_vm) {
         build_guest_table();
         g_table_built = true;
     }
+    if (g_sig_provider) install_variadic_slots(&g_guest_table, g_sig_provider, g_sig_ctx);
 
     JNIInvokeInterface_& iv = g_guest_invoke;
     iv.reserved0 = nullptr;
@@ -201,6 +204,14 @@ JNIEnv* guest_env_for_current_thread() {
 JNIEnv* host_env_of(JNIEnv* guest) {
     GuestEnv* g = guest_env_from(guest);
     return g ? g->host : nullptr;
+}
+
+void guest_jni_set_signature_provider(SignatureProvider provider, void* ctx) {
+    g_sig_provider = provider;
+    g_sig_ctx = ctx;
+    // If the table already exists, install the bridges now; otherwise
+    // guest_jni_init will, once it has built the table.
+    if (g_table_built) install_variadic_slots(&g_guest_table, provider, ctx);
 }
 
 }  // namespace winapk
