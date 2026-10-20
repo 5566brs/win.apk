@@ -31,7 +31,7 @@ printf 'security.provider.1=SunMSCAPI\nsecurity.provider.2=SUN\n' > "$BUILD/wine
 winpath() { "$WINE" winepath -w "$1" 2>/dev/null; }
 
 MACAPK_JVM_OPTS="-Djava.security.properties=$(winpath "$BUILD/wine.security")" \
-WINAPK_HEADLESS_EXIT_AFTER_FRAMES="$FRAMES" \
+WINAPK_HEADLESS=1 WINAPK_HEADLESS_EXIT_AFTER_FRAMES="$FRAMES" \
 WINAPK_HEADLESS_FRAME="$(winpath "$BUILD/frame.bmp")" \
 WINEDEBUG=-all "$WINE" "$BUILD/runtime/bin/winapk-runtime.exe" \
     --apk "$(winpath "$(realpath "$APK")")" --jdk "$(winpath "$JDK")" --data "$(winpath "$BUILD/appdata")" \

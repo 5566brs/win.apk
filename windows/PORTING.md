@@ -145,7 +145,8 @@ Everything in this section is merged on `main` and tested in CI on
 | `src/jni_bind.cpp` | Binds guest natives into HotSpot: the guest `RegisterNatives` slot wraps each function in a thunk, and a JVMTI `NativeMethodBind` hook swaps guest addresses for thunks. Thunks are cached per function and signature. Also the cached JVMTI signature provider |
 | `host/runtime_main.cpp` | `winapk-runtime`, the host that runs an APK: converts its DEX with upstream's converter (cached), creates the JVM in-process with upstream's options, binds the host natives and calls `Boot.run` |
 | `host/host_natives.cpp` | Binds every native method of upstream's 39 host classes: the Windows implementation where there is one, otherwise a stub that returns zero and logs its name on first call |
-| `host/native_log.cpp`, `host/native_cocoa.cpp` | `NativeLog`, and a headless `NativeCocoa`: fixed screen metrics, a 60 Hz render tick driving the app's renderer, frames optionally written to a BMP |
+| `host/native_log.cpp`, `host/native_cocoa.cpp` | `NativeLog`, and `NativeCocoa`: screen metrics, a 60 Hz render tick driving the app's renderer, presents, input delivery to `TouchDispatcher`, and headless mode (frames optionally written to a BMP) |
+| `host/win32_window.cpp` | The app's Win32 window on its own UI thread: frames painted with GDI and scaled to the per-monitor-DPI client area; mouse to `MotionEvent`, wheel to a short drag, keyboard to `KeyEvent` (Escape is BACK); minimize and restore for `moveTaskToBack`/`Front` |
 | `scripts/build_java.sh`, `scripts/build_framework_res.sh`, `scripts/stage_runtime.sh` | Build upstream's Java runtime with a stock JDK, the platform resource APK with upstream's script and Google's `aapt2`, and stage `bin/` and `lib/` into a runnable folder |
 | `tools/elfrun_main.cpp` | `winapk-elfrun`, the loader and ABI test runner |
 | `tools/jvmrun_main.cpp` | `winapk-jvm-run`, the real-JVM end-to-end test |
@@ -164,8 +165,10 @@ Everything in this section is merged on `main` and tested in CI on
 
 ### Not there yet
 
-A Java-only app boots and draws, but there is no window yet: frames only go
-to a file. Input, audio, SQLite and most other host natives are stubs. The
+A Java-only app runs in a window and takes mouse and keyboard input, but it is
+drawn in software and scaled with GDI: there is no OpenGL (ANGLE) yet, so
+`GLSurfaceView` apps and games do not render. Audio, SQLite and most other
+host natives are stubs. The
 libc shim covers about twenty functions plus libdl, and HotSpot cannot yet
 find a guest library through `System.loadLibrary` (see the stub DLL note in
 section 6).
@@ -297,6 +300,17 @@ nobody has to find them again.
   (`<lib>/../bin/tools/framework-res.apk`), and the Android file system under
   the `macapk.android.root` property, which the host points at
   `%LOCALAPPDATA%\Win.apk\android`.
+- `TouchDispatcher.dispatch(action, x, y, viewW, viewH)` takes AppKit view
+  coordinates: points, with the origin at the bottom left. It multiplies them
+  by `NativeCocoa.backingScale()`, so on Windows that has to be the device
+  density (surface pixels per point), not the monitor's scale.
+- A single synthesized DOWN, MOVE, UP (upstream's mouse-wheel scroll) does not
+  scroll a `RecyclerView` here: the first move past the touch slop only makes
+  the view take the gesture over, and only later moves scroll. The wheel drag
+  therefore steps just past the slop first.
+- Under Wine, a window needs an X display. `Xvfb :99` plus `xdotool` (clicks,
+  keys) and ImageMagick's `import -window root` (screenshots) are enough to
+  drive an app from a script.
 - Upstream gap, not Windows-specific: `Resources.getIntArray` on an
   `<array>` whose items are color references returns an empty array (the
   Sudoku tutorial's dot colors). Worth reporting upstream.
@@ -487,6 +501,13 @@ Exit: a Java-only APK boots through `Application.onCreate` and
 
 ### M2. Window, input and rendering (4 to 8 weeks)
 
+Status: the software path is done. A Java-only app draws into a Win32 window
+and responds to the mouse, the wheel and the keyboard (checked with the F-Droid
+Coffee app: toggle, navigation, a settings switch, Back). Remaining: ANGLE and
+EGL for OpenGL apps, sharper text on high-DPI screens (the surface is fixed at
+density 2 and scaled), window resizing and orientation polish, dark mode, and
+vsync instead of the fixed 60 Hz tick.
+
 - Implement the 54 natives of `NativeCocoa` on Win32: window creation, DPI
   scaling, resizing and orientation, mouse, keyboard, touchpad and touch input,
   the back button, dark mode, vsync (DXGI waitable swap chain) and the present
@@ -639,6 +660,9 @@ You also need a Windows JDK (for example the Temurin 21 zip) for `jvm.dll`,
 - Boot an APK headless:
   `WINAPK_WIN_JDK=<windows-jdk> windows/test/run_app_wine.sh app.apk`
   (also needs `curl` and `unzip` for the first resource build)
+- Run an APK in a window: start `Xvfb :99`, then run `winapk-runtime.exe`
+  under Wine with `DISPLAY=:99` and without `WINAPK_HEADLESS`; see the Wine
+  note in section 5
 
 ### Local setup on Windows
 

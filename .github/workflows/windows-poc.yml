@@ -102,17 +102,27 @@ jobs:
           apk=org.secuso.privacyfriendlysudoku_101.apk
           curl -sSfL -o sudoku.apk "https://f-droid.org/repo/$apk" \
             || curl -sSfL -o sudoku.apk "https://f-droid.org/archive/$apk"
-          export WINAPK_HEADLESS_EXIT_AFTER_FRAMES=30
+          export WINAPK_HEADLESS=1 WINAPK_HEADLESS_EXIT_AFTER_FRAMES=30
           export WINAPK_HEADLESS_FRAME="$(cygpath -w "$PWD/frame.bmp")"
           timeout 600 ./runtime/bin/winapk-runtime.exe --apk sudoku.apk --jdk "$JAVA_HOME" --data "$(cygpath -w "$PWD/appdata")" \
             > boot.log 2>&1 || { tail -n 200 boot.log; exit 1; }
           grep -E "first frame presented|frames presented" boot.log
+      - name: Boot an APK in a window
+        run: |
+          # The runner has a desktop session, so this exercises the Win32
+          # window: it must open (no headless fallback) and receive frames.
+          export WINAPK_HEADLESS_EXIT_AFTER_FRAMES=30
+          timeout 600 ./runtime/bin/winapk-runtime.exe --apk sudoku.apk --jdk "$JAVA_HOME" --data "$(cygpath -w "$PWD/appdata")" \
+            > window.log 2>&1 || { tail -n 200 window.log; exit 1; }
+          if grep -E "running headless|running without a window" window.log; then exit 1; fi
+          grep -E "frames presented" window.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: headless-boot
           path: |
             boot.log
+            window.log
             frame.bmp
       - uses: actions/upload-artifact@v4
         with:
