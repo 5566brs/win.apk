@@ -95,7 +95,7 @@ if(WINAPK_JNI_INCLUDE)
   # jvm.dll at runtime.
   add_executable(winapk-runtime host/runtime_main.cpp host/host_natives.cpp host/native_log.cpp
                               host/native_cocoa.cpp host/win32_window.cpp)
-  target_link_libraries(winapk-runtime PRIVATE winapk_jni winapk_sqlite)
+  target_link_libraries(winapk-runtime PRIVATE winapk_jni winapk_sqlite windowscodecs ole32)
   target_compile_options(winapk-runtime PRIVATE -Wall -Wextra)
   # Upstream's NativeSqlite bridge, compiled unchanged: compat/ supplies the
   # few CoreFoundation string calls it makes. Upstream's warnings are not ours.

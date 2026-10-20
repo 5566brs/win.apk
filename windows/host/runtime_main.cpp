@@ -320,6 +320,7 @@ int wmain(int argc, wchar_t** argv) {
 
     std::error_code ec;
     b.app_dir = b.options.data / "apps" / b.options.apk.stem();
+    winapk::host::set_app_dir(b.app_dir.wstring());
     fs::create_directories(b.app_dir, ec);
     if (ec) {
         std::fprintf(stderr, "[win.apk] cannot create %s\n", utf8(b.app_dir.wstring()).c_str());

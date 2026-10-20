@@ -40,6 +40,9 @@ void window_set_phone_size(int phone_w, int phone_h);
 // The app moved its task to the back or front (Activity.moveTaskToBack).
 void window_minimize();
 void window_restore();
+// The window and taskbar icon, from a PNG (the app's rendered launcher icon).
+// Returns false if the file cannot be read or decoded.
+bool window_set_icon_png(const std::wstring& path);
 // The color shown until the first frame (the theme's windowBackground).
 void window_set_background(uint32_t argb);
 // Copies the frame; it is painted on the UI thread.

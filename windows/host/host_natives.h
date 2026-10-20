@@ -11,6 +11,7 @@
 #pragma once
 
 #include <cstddef>
+#include <string>
 
 #include <jni.h>
 #include <jvmti.h>
@@ -34,6 +35,10 @@ struct HostMethods {
 // The implementations, one file per Java class.
 HostMethods native_log_methods();    // native_log.cpp
 HostMethods native_cocoa_methods();  // native_cocoa.cpp (headless for now)
+
+// The app's directory under the data directory, where Boot renders the
+// launcher icon (icon.png) that becomes the window's icon. native_cocoa.cpp.
+void set_app_dir(const std::wstring& dir);
 
 struct NativeStats {
     int classes = 0;        // host classes found

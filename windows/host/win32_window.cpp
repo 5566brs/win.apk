@@ -9,6 +9,7 @@
 #include <vector>
 
 #include <windows.h>
+#include <wincodec.h>
 
 namespace winapk::host {
 
@@ -288,6 +289,91 @@ bool window_start(int phone_w, int phone_h, WindowInput* input) {
 }
 
 bool window_running() { return g_hwnd != nullptr; }
+
+namespace {
+
+// Decodes `path` with WIC and scales it to size x size, as a top-down 32-bit
+// BGRA DIB with straight alpha, which is what an icon's color bitmap takes.
+HICON icon_from_png(const std::wstring& path, int size) {
+    const HRESULT init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    HICON icon = nullptr;
+    IWICImagingFactory* factory = nullptr;
+    IWICBitmapDecoder* decoder = nullptr;
+    IWICBitmapFrameDecode* frame = nullptr;
+    IWICBitmapScaler* scaler = nullptr;
+    IWICFormatConverter* converter = nullptr;
+    if (SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                                   IID_PPV_ARGS(&factory))) &&
+        SUCCEEDED(factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ,
+                                                     WICDecodeMetadataCacheOnDemand, &decoder)) &&
+        SUCCEEDED(decoder->GetFrame(0, &frame)) && SUCCEEDED(factory->CreateBitmapScaler(&scaler)) &&
+        SUCCEEDED(scaler->Initialize(frame, size, size, WICBitmapInterpolationModeFant)) &&
+        SUCCEEDED(factory->CreateFormatConverter(&converter)) &&
+        SUCCEEDED(converter->Initialize(scaler, GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, nullptr,
+                                        0.0, WICBitmapPaletteTypeCustom))) {
+        BITMAPINFO bi{};
+        bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+        bi.bmiHeader.biWidth = size;
+        bi.bmiHeader.biHeight = -size;  // top-down
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        void* bits = nullptr;
+        HBITMAP color = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        HBITMAP mask = CreateBitmap(size, size, 1, 1, nullptr);
+        if (color && mask &&
+            SUCCEEDED(converter->CopyPixels(nullptr, static_cast<UINT>(size) * 4,
+                                            static_cast<UINT>(size) * static_cast<UINT>(size) * 4,
+                                            static_cast<BYTE*>(bits)))) {
+            ICONINFO ii{};
+            ii.fIcon = TRUE;
+            ii.hbmMask = mask;
+            ii.hbmColor = color;
+            icon = CreateIconIndirect(&ii);
+        }
+        if (color) DeleteObject(color);
+        if (mask) DeleteObject(mask);
+    }
+    if (converter) converter->Release();
+    if (scaler) scaler->Release();
+    if (frame) frame->Release();
+    if (decoder) decoder->Release();
+    if (factory) factory->Release();
+    if (SUCCEEDED(init)) CoUninitialize();
+    return icon;
+}
+
+}  // namespace
+
+bool window_set_icon_png(const std::wstring& path) {
+    if (!g_hwnd) return false;
+    // The sizes Windows asks for at the window's DPI: the title bar takes the
+    // small one, Alt+Tab and the taskbar the big one.
+    using DpiFn = UINT(WINAPI*)(HWND);
+    using MetricsFn = int(WINAPI*)(int, UINT);
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    auto dpi_for = reinterpret_cast<DpiFn>(GetProcAddress(user32, "GetDpiForWindow"));
+    auto metrics_for = reinterpret_cast<MetricsFn>(GetProcAddress(user32, "GetSystemMetricsForDpi"));
+    const UINT dpi = dpi_for ? dpi_for(g_hwnd) : 96;
+    auto metric = [&](int m) { return metrics_for ? metrics_for(m, dpi) : GetSystemMetrics(m); };
+    HICON big = icon_from_png(path, metric(SM_CXICON));
+    HICON small = icon_from_png(path, metric(SM_CXSMICON));
+    if (!big || !small) {
+        if (big) DestroyIcon(big);
+        if (small) DestroyIcon(small);
+        return false;
+    }
+    // The window keeps using the icons, so the previous pair is freed only
+    // once the new one is in.
+    static HICON s_big = nullptr, s_small = nullptr;
+    SendMessageW(g_hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(big));
+    SendMessageW(g_hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(small));
+    if (s_big) DestroyIcon(s_big);
+    if (s_small) DestroyIcon(s_small);
+    s_big = big;
+    s_small = small;
+    return true;
+}
 
 void window_show() {
     if (g_hwnd) PostMessageW(g_hwnd, kMsgShow, 0, 0);

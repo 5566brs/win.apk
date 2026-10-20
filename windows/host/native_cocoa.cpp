@@ -112,6 +112,27 @@ bool headless_requested() {
     return e && *e && *e != '0';
 }
 
+// ---- the app icon -----------------------------------------------------------
+//
+// Boot renders the app's launcher icon, adaptive and vector ones included, to
+// <app dir>/icon.png for upstream's launcher. Here it becomes the window and
+// taskbar icon: right away when an earlier run left one, and again whenever
+// the file changes (a first run renders it during boot, before the activity
+// shows its window).
+
+std::mutex g_icon_lock;
+std::wstring g_icon_path;
+FILETIME g_icon_applied{};
+
+void apply_app_icon() {
+    std::lock_guard<std::mutex> hold(g_icon_lock);
+    if (g_icon_path.empty() || !window_running()) return;
+    WIN32_FILE_ATTRIBUTE_DATA attrs;
+    if (!GetFileAttributesExW(g_icon_path.c_str(), GetFileExInfoStandard, &attrs)) return;
+    if (CompareFileTime(&attrs.ftLastWriteTime, &g_icon_applied) == 0) return;
+    if (window_set_icon_png(g_icon_path)) g_icon_applied = attrs.ftLastWriteTime;
+}
+
 jboolean JNICALL Cocoa_init(JNIEnv* env, jclass) {
     env->GetJavaVM(&g_vm);
     if (headless_requested()) {
@@ -119,6 +140,7 @@ jboolean JNICALL Cocoa_init(JNIEnv* env, jclass) {
     } else if (!window_start(g_phone_w, g_phone_h, &g_java_input)) {
         std::fprintf(stderr, "[win.apk] no desktop to open a window on; running headless\n");
     }
+    apply_app_icon();
     return JNI_TRUE;
 }
 
@@ -151,7 +173,10 @@ void JNICALL Cocoa_applyRequestedOrientation(JNIEnv*, jclass, jboolean landscape
     window_set_phone_size(g_phone_w, g_phone_h);
 }
 
-void JNICALL Cocoa_showWindow(JNIEnv*, jclass, jlong) { window_show(); }
+void JNICALL Cocoa_showWindow(JNIEnv*, jclass, jlong) {
+    apply_app_icon();
+    window_show();
+}
 void JNICALL Cocoa_moveTaskToBack(JNIEnv*, jclass) { window_minimize(); }
 void JNICALL Cocoa_moveTaskToFront(JNIEnv*, jclass) { window_restore(); }
 void JNICALL Cocoa_setStartingWindowColor(JNIEnv*, jclass, jint argb) {
@@ -165,6 +190,7 @@ void JNICALL Cocoa_setWindowTitle(JNIEnv* env, jclass, jlong, jstring title) {
         window_set_title(t);
         env->ReleaseStringUTFChars(title, t);
     }
+    apply_app_icon();
 }
 
 jlong JNICALL Cocoa_createWindow(JNIEnv*, jclass, jstring) { return new_handle(); }
@@ -379,5 +405,10 @@ const HostMethod kMethods[] = {
 }  // namespace
 
 HostMethods native_cocoa_methods() { return {kMethods, sizeof(kMethods) / sizeof(kMethods[0])}; }
+
+void set_app_dir(const std::wstring& dir) {
+    std::lock_guard<std::mutex> hold(g_icon_lock);
+    g_icon_path = dir + L"\\icon.png";
+}
 
 }  // namespace winapk::host
