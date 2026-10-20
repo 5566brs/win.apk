@@ -23,3 +23,4 @@ WINE="${WINE:-$(command -v wine64 || command -v wine || echo /usr/lib/wine/wine6
 WINEDEBUG=-all "$WINE" "$BUILD/host/winapk-elfrun.exe" \
     "$BUILD/guest/libwinapk_poc_guest.so" \
     "$BUILD/guest/libwinapk_poc_guest_packed.so"
+WINEDEBUG=-all "$WINE" "$BUILD/host/winapk-linker-test.exe" "$BUILD/guest/link"

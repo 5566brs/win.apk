@@ -27,6 +27,7 @@ add_library(winapk_loader STATIC
   src/fs_tls_patch.cpp
   src/mini_bionic.cpp
   src/abi_thunk.cpp
+  src/linker.cpp
 )
 target_include_directories(winapk_loader PUBLIC include)
 target_compile_definitions(winapk_loader PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -40,10 +41,14 @@ target_link_libraries(winapk-elfrun PRIVATE winapk_loader)
 add_executable(winapk-thunk-test test/thunk_test.cpp)
 target_link_libraries(winapk-thunk-test PRIVATE winapk_loader)
 
+add_executable(winapk-linker-test test/linker_test.cpp)
+target_link_libraries(winapk-linker-test PRIVATE winapk_loader)
+
 if(MINGW)
   # One self-contained .exe: no libstdc++/libgcc/winpthread DLLs next to it.
   target_link_options(winapk-elfrun PRIVATE -static)
   target_link_options(winapk-thunk-test PRIVATE -static)
+  target_link_options(winapk-linker-test PRIVATE -static)
 endif()
 
 # The JNI bridge needs jni.h + win32/jni_md.h. Point WINAPK_JNI_INCLUDE at a

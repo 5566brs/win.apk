@@ -37,6 +37,7 @@ jobs:
           name: guest-libs
           path: |
             ${{ runner.temp }}/guest/*.so
+            ${{ runner.temp }}/guest/link/*.so
             ${{ runner.temp }}/guest/e2e/libwinapk_jni_guest.so
             ${{ runner.temp }}/guest/e2e/classes/**
 
@@ -78,6 +79,8 @@ jobs:
         run: ./build/winapk-jni-variadic-test.exe
       - name: Run the PoC checks
         run: ./build/winapk-elfrun.exe guest/libwinapk_poc_guest.so guest/libwinapk_poc_guest_packed.so
+      - name: Run the guest linker test
+        run: ./build/winapk-linker-test.exe guest/link
       - name: Run the real-JVM end-to-end test
         run: |
           export PATH="$(cygpath -u "$JAVA_HOME")/bin/server:$(cygpath -u "$JAVA_HOME")/bin:$PATH"
