@@ -37,6 +37,11 @@ bool window_running();
 void window_show();
 void window_set_title(const std::string& utf8);
 void window_set_phone_size(int phone_w, int phone_h);
+// The app moved its task to the back or front (Activity.moveTaskToBack).
+void window_minimize();
+void window_restore();
+// The color shown until the first frame (the theme's windowBackground).
+void window_set_background(uint32_t argb);
 // Copies the frame; it is painted on the UI thread.
 void window_present(const uint32_t* argb, int w, int h);
 

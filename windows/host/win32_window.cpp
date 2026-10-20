@@ -2,7 +2,9 @@
 
 #include "win32_window.h"
 
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <vector>
 
@@ -14,6 +16,7 @@ namespace {
 
 constexpr UINT kMsgShow = WM_APP + 1;
 constexpr UINT kMsgResize = WM_APP + 2;
+constexpr UINT kMsgShowState = WM_APP + 3;  // wParam: SW_MINIMIZE or SW_RESTORE
 constexpr wchar_t kClassName[] = L"WinApkAppWindow";
 
 // android.view.KeyEvent META_* bits.
@@ -29,6 +32,7 @@ bool g_pointer_down = false;
 std::mutex g_frame_lock;
 std::vector<uint32_t> g_frame;
 int g_frame_w = 0, g_frame_h = 0;
+COLORREF g_background = RGB(255, 255, 255);  // until the first frame
 
 UINT window_dpi(HWND hwnd) {
     using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
@@ -69,7 +73,9 @@ void paint(HWND hwnd) {
             StretchDIBits(dc, 0, 0, client.right, client.bottom, 0, 0, g_frame_w, g_frame_h, g_frame.data(), &bi,
                           DIB_RGB_COLORS, SRCCOPY);
         } else {
-            FillRect(dc, &client, static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
+            HBRUSH brush = CreateSolidBrush(g_background);
+            FillRect(dc, &client, brush);
+            DeleteObject(brush);
         }
     }
     EndPaint(hwnd, &ps);
@@ -82,6 +88,47 @@ void send_pointer(HWND hwnd, int action, LPARAM lp) {
     const float x = static_cast<float>(static_cast<short>(LOWORD(lp)));
     const float y = static_cast<float>(static_cast<short>(HIWORD(lp)));
     g_input->pointer(action, x, y, static_cast<float>(client.right), static_cast<float>(client.bottom));
+}
+
+// A wheel step becomes a short drag, as upstream turns a mouse wheel into
+// DOWN, MOVE, UP (cocoa_bridge.mm scrollWheel:): a line is 16 points, scaled by
+// MACAPK_SCROLL_SCALE (default 0.5), and a notch is the user's "lines per
+// notch" setting. Wheel up scrolls toward the top, so the finger moves down.
+void send_wheel(HWND hwnd, WPARAM wp, LPARAM lp, bool horizontal) {
+    if (g_pointer_down) return;  // a drag is in progress; do not interleave
+    static const float scale = [] {
+        const char* e = std::getenv("MACAPK_SCROLL_SCALE");
+        const float v = e ? static_cast<float>(std::atof(e)) : 0.5f;
+        return (v >= 0.05f && v <= 4.0f) ? v : 0.5f;
+    }();
+    UINT lines = 3;
+    SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &lines, 0);
+    if (lines == WHEEL_PAGESCROLL || lines == 0) lines = 3;
+    const float notches = static_cast<float>(GET_WHEEL_DELTA_WPARAM(wp)) / WHEEL_DELTA;
+    const float points = notches * static_cast<float>(lines) * 16.0f * scale;
+    RECT client;
+    GetClientRect(hwnd, &client);
+    if (client.right <= 0 || client.bottom <= 0) return;
+    POINT p{static_cast<short>(LOWORD(lp)), static_cast<short>(HIWORD(lp))};  // screen coordinates
+    ScreenToClient(hwnd, &p);
+    const float w = static_cast<float>(client.right), h = static_cast<float>(client.bottom);
+    // Client pixels per point, along the scroll axis.
+    const float per_point = horizontal ? w / static_cast<float>(g_phone_w) : h / static_cast<float>(g_phone_h);
+    // A scrolling view takes the gesture over on the first move past the touch
+    // slop (8 dp) and scrolls only on later moves, so the drag first steps just
+    // past the slop and then by the whole amount. Upstream's single move gets
+    // swallowed by that first step. The events share a timestamp, so there is
+    // no fling.
+    const float sign = horizontal ? (points > 0 ? -1.0f : 1.0f) : (points > 0 ? 1.0f : -1.0f);
+    const float slop = 10.0f * per_point * sign;
+    const float travel = std::fabs(points) * per_point * sign;
+    const float x0 = static_cast<float>(p.x), y0 = static_cast<float>(p.y);
+    const float x1 = horizontal ? x0 + slop : x0, y1 = horizontal ? y0 : y0 + slop;
+    const float x2 = horizontal ? x1 + travel : x0, y2 = horizontal ? y0 : y1 + travel;
+    g_input->pointer(0, x0, y0, w, h);
+    g_input->pointer(2, x1, y1, w, h);
+    g_input->pointer(2, x2, y2, w, h);
+    g_input->pointer(1, x2, y2, w, h);
 }
 
 int meta_state() {
@@ -132,6 +179,12 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 ReleaseCapture();
             }
             return 0;
+        case WM_MOUSEWHEEL:
+            send_wheel(hwnd, wp, lp, false);
+            return 0;
+        case WM_MOUSEHWHEEL:
+            send_wheel(hwnd, wp, lp, true);
+            return 0;
         case WM_CAPTURECHANGED:
             if (g_pointer_down) {  // capture taken away mid-drag
                 g_pointer_down = false;
@@ -159,6 +212,10 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case kMsgShow:
             ShowWindow(hwnd, SW_SHOWNORMAL);
             SetForegroundWindow(hwnd);
+            return 0;
+        case kMsgShowState:
+            ShowWindow(hwnd, static_cast<int>(wp));
+            if (wp == SW_RESTORE) SetForegroundWindow(hwnd);
             return 0;
         case kMsgResize: {
             const SIZE s = outer_size(hwnd, static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE)));
@@ -248,6 +305,19 @@ void window_set_phone_size(int phone_w, int phone_h) {
     g_phone_w = phone_w;
     g_phone_h = phone_h;
     if (g_hwnd) PostMessageW(g_hwnd, kMsgResize, 0, 0);
+}
+
+void window_minimize() {
+    if (g_hwnd) PostMessageW(g_hwnd, kMsgShowState, SW_MINIMIZE, 0);
+}
+
+void window_restore() {
+    if (g_hwnd) PostMessageW(g_hwnd, kMsgShowState, SW_RESTORE, 0);
+}
+
+void window_set_background(uint32_t argb) {
+    g_background = RGB((argb >> 16) & 0xff, (argb >> 8) & 0xff, argb & 0xff);
+    if (g_hwnd) InvalidateRect(g_hwnd, nullptr, FALSE);
 }
 
 void window_present(const uint32_t* argb, int w, int h) {

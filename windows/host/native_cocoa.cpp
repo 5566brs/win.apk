@@ -150,6 +150,11 @@ void JNICALL Cocoa_applyRequestedOrientation(JNIEnv*, jclass, jboolean landscape
 }
 
 void JNICALL Cocoa_showWindow(JNIEnv*, jclass, jlong) { window_show(); }
+void JNICALL Cocoa_moveTaskToBack(JNIEnv*, jclass) { window_minimize(); }
+void JNICALL Cocoa_moveTaskToFront(JNIEnv*, jclass) { window_restore(); }
+void JNICALL Cocoa_setStartingWindowColor(JNIEnv*, jclass, jint argb) {
+    window_set_background(static_cast<uint32_t>(argb));
+}
 
 void JNICALL Cocoa_setWindowTitle(JNIEnv* env, jclass, jlong, jstring title) {
     if (!title) return;
@@ -354,6 +359,9 @@ const HostMethod kMethods[] = {
     WINAPK_HOST_NATIVE(kCls, "registerTouchDispatcher", "(Lcom/macapk/loader/TouchDispatcher;)V",
                        Cocoa_registerTouchDispatcher),
     WINAPK_HOST_NATIVE(kCls, "showWindow", "(J)V", Cocoa_showWindow),
+    WINAPK_HOST_NATIVE(kCls, "moveTaskToBack", "()V", Cocoa_moveTaskToBack),
+    WINAPK_HOST_NATIVE(kCls, "moveTaskToFront", "()V", Cocoa_moveTaskToFront),
+    WINAPK_HOST_NATIVE(kCls, "setStartingWindowColor", "(I)V", Cocoa_setStartingWindowColor),
     WINAPK_HOST_NATIVE(kCls, "setWindowTitle", "(JLjava/lang/String;)V", Cocoa_setWindowTitle),
     WINAPK_HOST_NATIVE(kCls, "presentFrame", "([IIIIIIII)I", Cocoa_presentFrame),
     WINAPK_HOST_NATIVE(kCls, "setRenderer", "(JLcom/macapk/loader/MetalSurfaceCallbacks;)V", Cocoa_setRenderer),
