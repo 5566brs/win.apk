@@ -175,6 +175,78 @@ libc shim covers about twenty functions plus libdl, and HotSpot cannot yet
 find a guest library through `System.loadLibrary` (see the stub DLL note in
 section 6).
 
+### Mac code inventory
+
+Every part of upstream that is Mac-specific, with its Windows counterpart and
+status. The Java framework (`runtime/java`, about 570,000 lines) is not listed:
+it runs on Windows as it is, apart from the small changes listed in
+`README.md`. Priority: **1** blocks most apps, **2** many apps, **3** some
+apps, **later** belongs to a later milestone, **n/a** not needed for x86_64.
+
+**Host natives** (the Java classes whose native methods the Mac host
+implements in `runtime/src`; on Windows `windows/host/native_*.cpp`):
+
+| Java class | Natives | Mac source | Windows | Status | Priority |
+|---|---|---|---|---|---|
+| `NativeCocoa` | 56 | `cocoa_bridge.mm`, `native_methods.cpp` | Win32 window, input, render tick | 24 done | 1 |
+| `NativeLog` | 6 | `native_methods.cpp` | `native_log.cpp` | 3 done | 1 |
+| `NativeSqlite` | 26 | `native_sqlite.cpp` | upstream file + CoreFoundation shim | done | - |
+| `NativeOs` | 18 | `native_os.cpp` | raw file descriptors and the guest environment, on the Windows CRT | not started | 1 |
+| `NativeLooper` | 12 | `native_methods.cpp` | the guest's `ALooper`, with M4 | not started | 2 |
+| `NativeLinker` | 3 | `native_linker.cpp` | the ELF linker (M4) | not started | 1 |
+| `NativeAudio` | 41 | `audio_backend.mm` | WASAPI | not started | 2 |
+| `NativeMedia` | 38 | `media_decode.mm`, `video_toolbox.mm`, `video_vp8/vp9_decode.mm` | Media Foundation, libvpx | not started | 2 |
+| `NativeImageCodec` | 3 | `native_methods.cpp` | WIC | not started | 2 |
+| `NativeGles`, `GLES10`-`GLES32`, `GLUtils` | 3 + 637 + 2 | `native_methods.cpp`, `gles*_bridges.inc`, `angle_glue.cpp` | ANGLE (D3D11) | not started | 2 (M2 part 2) |
+| `EGL14`, `EGL15`, `EGLExt`, `MacApkEGL10` | 52 | `native_methods.cpp`, `egl14_bridges.inc`, `angle_glue.cpp` | ANGLE | not started | 2 |
+| `ClipboardManager` | 7 | `clipboard_bridge.mm` | Win32 clipboard | not started | 3 |
+| `DocumentPickerHandler` | 4 | `document_picker.mm` | `IFileOpenDialog` | not started | 3 |
+| `HostIcu` | 2 | `icu_host_bridge.cpp` | Windows' ICU (`icu.dll`) | not started | 3 |
+| `HostWallpaper` | 2 | `wallpaper_bridge.mm` | the desktop wallpaper through WIC | not started | 3 |
+| `AudioInputBridge` | 12 | `audio_input.mm` | WASAPI capture | not started | 3 |
+| `LocationBridge` | 11 | `location_bridge.mm` | `Windows.Devices.Geolocation` | not started | 3 |
+| `GamepadBridge` | 4 | `gamecontroller_bridge.mm` | XInput / GameInput | not started | 3 |
+| `CameraBridge` | 30 | `camera_capture.mm` | Media Foundation capture | not started | 3 |
+| `MediaStoreProvider` | 7 | `photos_bridge.mm` | the Pictures library | not started | 3 |
+| `MacApkWebViewBridge` | 29 | `webview_bridge.mm` | WebView2 | not started | 2 |
+| `NativeSignIn` | 2 | `gms_signin.mm` | a browser sign-in window | not started | later |
+| `NativeActivity`, `InputQueue` | 22 + 5 | `bionic_shim_nativeactivity.cpp` | with M4/M6 | not started | 2 |
+| Firebase C++ helpers (4 classes) | 4 | the app's own native code | with M4 | - | - |
+
+**Other host code** (`runtime/src`):
+
+| Mac source | Lines | What it does | Windows | Status |
+|---|---|---|---|---|
+| `main.cpp` | 3,890 | launcher entry: install, convert, start the JVM | `host/runtime_main.cpp` | done for Java apps |
+| `jvm_loader.cpp` | 792 | in-process HotSpot | `host/runtime_main.cpp` | done |
+| `apk_unpacker.cpp` | 4,473 | install layout, split bundles, DEX conversion | `java/.../AppInstall.java` + the upstream converter | done |
+| `window_policy.cpp`, `window_traits.cpp` | 3,009 | window shape per activity, orientation, resize | `win32_window.cpp` | phone size only |
+| `apk_native_exec.cpp` | 509 | APK-shipped executables | later (M5) | not started |
+| `app_process_group.cpp` | 66 | child processes die with the app | Job objects | not started |
+| `app_native_stub.cpp` | 19 | no-op library for unloadable `.so` | a stub DLL (M4) | not started |
+| `host_keymap.h` | 157 | host keys to Android keys | `android_key_code` in `win32_window.cpp` | done |
+
+**Native code support** (`runtime/translator/src`):
+
+| Mac source | Lines | What it does | Windows | Status |
+|---|---|---|---|---|
+| `arm64_native.cpp`, `arm64_pack.cpp`, `arm64_macho_emit.cpp` | 17,585 | load arm64 `.so` on Apple Silicon | `src/elf_loader.cpp`, `src/linker.cpp` (x86_64) | loader done, not wired in (M4) |
+| `main.cpp` (translator CLI) | 9,744 | `.so` to a host library | a `macapk-translator.exe` that writes a stub DLL (M4) | not started |
+| `bionic_shim.cpp` | 66,962 | Android's libc, libdl, liblog, libm, libandroid... on Darwin | `src/mini_bionic.cpp` on the Windows CRT and Win32 (M5) | 23 functions |
+| `bionic_shim_jni_bare.cpp`, `_jni_cxxwrap.cpp` | 1,119 | variadic JNI calls | `src/jni_variadic.cpp` | done |
+| `bionic_shim_sigchain.cpp`, `_signal.cpp` | 1,913 | signals and chaining with the JVM | vectored exception handling (M5) | not started |
+| `bionic_shim_sensors.cpp` | 540 | NDK sensors | port as is (M5) | not started |
+| `bionic_shim_vulkan.cpp` | 401 | Vulkan over MoltenVK | the system Vulkan loader (M6) | not started |
+| `bionic_shim_cacerts.cpp` | 218 | CA store from the Mac's roots | the Windows root store | not started |
+| `bionic_shim_forkwatch.cpp`, `_elfexec.cpp`, `elfexec_main.cpp` | 1,471 | forked and shipped executables | later (M5) | not started |
+| `media_ndk.cpp` | 701 | NDK `AMediaCodec` | port with `NativeMedia` | not started |
+| `pairip_*`, `art_jni_offsets.h` | 5,286 | Play Integrity emulation | later | - |
+| `arm32_lifter.cpp`, `bionic_shim_arm32*.cpp`, `bionic_shim_gles1.cpp`, `elf_reader.cpp`, `elf64_reader.cpp` | 19,296 | ARM translation | n/a (D8: the ARM stage) | - |
+
+**Launcher** (`launcher/*.swift`, 17,851 lines): the Mac app library, install
+UI and per-app bundles. Windows: a launcher with Start menu entries (M8). Until
+then, `Run APK.bat`.
+
 ## 5. Technical findings
 
 These were measured or discovered during the work. They are written down so
