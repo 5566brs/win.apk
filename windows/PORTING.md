@@ -323,6 +323,12 @@ nobody has to find them again.
   `SQLiteOpenHelper` holds around `onCreate`, and its `Application.onCreate`
   died with "cannot start a transaction within a transaction". Fixed here
   (listed in `README.md`).
+- Upstream's inflater built every child of a `<merge>` layout inflated without
+  a parent and then dropped them all, returning an empty `FrameLayout`.
+  `Activity.setContentView` inflates that way, so any activity whose layout is
+  a `<merge>` (Vanilla Music, Diary) showed nothing and every `findViewById` in
+  its `onCreate` returned null. On Android the window's content frame is the
+  parent. Fixed here by merging into a `FrameLayout` (listed in `README.md`).
 - Under Wine, a window needs an X display. `Xvfb :99` plus `xdotool` (clicks,
   keys) and ImageMagick's `import -window root` (screenshots) are enough to
   drive an app from a script.

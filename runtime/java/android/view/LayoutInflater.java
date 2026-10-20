@@ -839,7 +839,22 @@ public class LayoutInflater {
         if (rootElem == null) {
             return new android.widget.FrameLayout(context);
         }
-        View inflated = inflateElement(rootElem, root);
+        View inflated;
+        if (root == null && "merge".equals(rootElem.getTagName())) {
+            // A <merge> layout with no parent to merge into. AOSP throws here,
+            // but Activity.setContentView never gets that far there: PhoneWindow
+            // inflates into the window's content FrameLayout, and the merged
+            // children become its children. Inflating without a parent used to
+            // build every child and drop it, handing back an empty FrameLayout,
+            // so an activity whose layout is a <merge> showed nothing and each
+            // findViewById in its onCreate returned null. Merge into a
+            // FrameLayout instead, which is what the content frame is.
+            android.widget.FrameLayout frame = new android.widget.FrameLayout(context);
+            inflateElement(rootElem, frame);
+            inflated = frame;
+        } else {
+            inflated = inflateElement(rootElem, root);
+        }
         if (inflated == null) inflated = new android.widget.FrameLayout(context);
         // MACAPK_TRACE_LAYOUTREQ=1: dump each inflated view's
         // isLayoutRequested() + childCount at the END of inflate.

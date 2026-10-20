@@ -125,6 +125,9 @@ Windows hook is unavoidable, and every such change is listed here:
 - `runtime/java/android/database/sqlite/SQLiteDatabase.java`: `BEGIN`,
   `COMMIT` and `ROLLBACK` given to `execSQL` nest in the transaction stack, as
   AOSP's `SQLiteSession.executeSpecial` does. Not Windows-specific.
+- `runtime/java/android/view/LayoutInflater.java`: a `<merge>` layout inflated
+  without a parent merges into a `FrameLayout` instead of being dropped, so
+  `setContentView` of a `<merge>` layout works. Not Windows-specific.
 
 ## License
 
