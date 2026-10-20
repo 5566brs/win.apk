@@ -6,6 +6,7 @@
 #   <out>/lib/android-framework.jar   the Android framework reimplementation
 #   <out>/lib/macapk-loader.jar       boot code and the DEX-to-JVM converter
 #   <out>/lib/bcprov-jdk18on-1.79.jar the "BC" security provider Android has
+#   <out>/lib/winapk-tools.jar        Windows-side helpers (windows/java)
 #   <out>/lib/java_base_patch/        classes patched into java.base
 #   <out>/lib/jdk_unsupported_patch/  classes patched into jdk.unsupported
 #
@@ -111,5 +112,15 @@ if [[ -d "$TMP/META-INF/services" ]]; then
 fi
 cp -f "$RT/thirdparty/bcprov-jdk18on-1.79.jar" "$LIB/"
 
+# Our own helpers, kept out of upstream's jars.
+echo "[build_java] compiling windows/java..."
+TOOLS="$WORK/tools"
+rm -rf "$TOOLS"
+mkdir -p "$TOOLS"
+find "$HERE/../java" -name '*.java' | sort | native_paths > "$WORK/tools.list"
+"$JAVAC" -d "$TOOLS" --release 21 @"$WORK/tools.list"
+( cd "$TOOLS" && "$JAR" --create --file "$LIB/winapk-tools.jar" . )
+
 echo "[build_java] $LIB/android-framework.jar"
 echo "[build_java] $LIB/macapk-loader.jar"
+echo "[build_java] $LIB/winapk-tools.jar"

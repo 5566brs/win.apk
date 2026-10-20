@@ -85,7 +85,9 @@ windows/scripts/stage_runtime.sh build runtime     # after building with CMake
 runtime/bin/winapk-runtime.exe --apk app.apk --jdk "$JAVA_HOME"
 ```
 
-The app opens in its own window and takes mouse, wheel and keyboard input
+`--apk` also takes a split bundle (`.apkm`, `.xapk` or `.apks`), installed once
+as `base.apk` plus `split_*.apk` under `%LOCALAPPDATA%\Win.apk\app`. The app
+opens in its own window, with its own icon, and takes mouse, wheel and keyboard input
 (Escape is Android's Back). Java-only apps work this way; OpenGL apps and games
 do not render yet. App data goes to `%LOCALAPPDATA%\Win.apk`.
 

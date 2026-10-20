@@ -174,6 +174,32 @@ bool convert_dex(const Options& o, const fs::path& app_dir, fs::path* jar) {
     return !ec;
 }
 
+// Step 1, for a split bundle (.apkm, .xapk, .apks): install it as base.apk
+// plus split_*.apk, the layout upstream's runtime and converter read
+// (com.winapk.tools.BundleInstall), once per bundle file. Afterwards the app
+// is the installed base.apk. The set lives in `dir` (<data>\app\<name>), apart
+// from the code dir, as on a device (data/app) and on the Mac: Boot moves
+// anything in the code dir it does not know as its own into the data dir.
+bool install_bundle(Options* o, const fs::path& dir) {
+    std::wstring ext = o->apk.extension().wstring();
+    std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
+    if (ext != L".apkm" && ext != L".xapk" && ext != L".apks") return true;
+    std::error_code ec;
+    const fs::path base = dir / "base.apk";
+    if (!(fs::exists(base, ec) && fs::last_write_time(base, ec) >= fs::last_write_time(o->apk, ec))) {
+        std::fprintf(stderr, "[win.apk] installing the bundle's APKs (once per install)...\n");
+        const int rc = run_process(quoted(o->jdk / "bin" / "java.exe") + L" -cp " +
+                                   quoted(o->lib / "winapk-tools.jar") + L" com.winapk.tools.BundleInstall " +
+                                   quoted(o->apk) + L" " + quoted(dir));
+        if (rc != 0) {
+            std::fprintf(stderr, "[win.apk] installing the bundle failed (exit code %d)\n", rc);
+            return false;
+        }
+    }
+    o->apk = base;
+    return true;
+}
+
 struct BootArgs {
     Options options;
     fs::path app_dir, app_jar;
@@ -313,7 +339,7 @@ DWORD WINAPI boot_thread(void* param) {
 int wmain(int argc, wchar_t** argv) {
     BootArgs b;
     if (!parse_args(argc, argv, &b.options)) {
-        std::fprintf(stderr, "usage: winapk-runtime --apk <file.apk> [--data <dir>] [--jdk <dir>] [--lib <dir>]\n");
+        std::fprintf(stderr, "usage: winapk-runtime --apk <file.apk|.apkm|.xapk|.apks> [--data <dir>] [--jdk <dir>] [--lib <dir>]\n");
         return 2;
     }
     if (!resolve_paths(&b.options)) return 2;
@@ -326,6 +352,7 @@ int wmain(int argc, wchar_t** argv) {
         std::fprintf(stderr, "[win.apk] cannot create %s\n", utf8(b.app_dir.wstring()).c_str());
         return 1;
     }
+    if (!install_bundle(&b.options, b.options.data / "app" / b.options.apk.stem())) return 1;
     if (!convert_dex(b.options, b.app_dir, &b.app_jar)) return 1;
 
     // Upstream runs the JVM with -Xss16m; give the creating thread as much.

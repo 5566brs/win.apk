@@ -14,7 +14,7 @@ native (.so) libraries, sound, and saving data in databases.
 How to run an app
 -----------------
 1. Unzip this folder anywhere, for example to C:\Win.apk.
-2. Drag an .apk file onto "Run APK.bat".
+2. Drag an .apk file (or an .apkm, .xapk or .apks bundle) onto "Run APK.bat".
 3. The first start of each app takes a while (up to a minute) because its
    code is converted once. Later starts are faster.
 
