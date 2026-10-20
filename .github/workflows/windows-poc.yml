@@ -22,14 +22,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
       - name: Install clang + lld
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang lld
       - name: Build guest .so files
         run: windows/test/build_guest.sh "$RUNNER_TEMP/guest"
+      - name: Build end-to-end guest library and Java class
+        run: windows/test/build_e2e.sh "$JAVA_HOME/include" "$JAVA_HOME/bin/javac" "$RUNNER_TEMP/guest/e2e"
       - uses: actions/upload-artifact@v4
         with:
           name: guest-libs
-          path: ${{ runner.temp }}/guest/*.so
+          path: |
+            ${{ runner.temp }}/guest/*.so
+            ${{ runner.temp }}/guest/e2e/libwinapk_jni_guest.so
+            ${{ runner.temp }}/guest/e2e/classes/**
 
   windows:
     name: Loader on Windows x64
@@ -69,7 +78,13 @@ jobs:
         run: ./build/winapk-jni-variadic-test.exe
       - name: Run the PoC checks
         run: ./build/winapk-elfrun.exe guest/libwinapk_poc_guest.so guest/libwinapk_poc_guest_packed.so
+      - name: Run the real-JVM end-to-end test
+        run: |
+          export PATH="$(cygpath -u "$JAVA_HOME")/bin/server:$(cygpath -u "$JAVA_HOME")/bin:$PATH"
+          ./build/winapk-jvm-run.exe guest/e2e/libwinapk_jni_guest.so guest/e2e/classes
       - uses: actions/upload-artifact@v4
         with:
-          name: winapk-elfrun
-          path: build/winapk-elfrun.exe
+          name: winapk-binaries
+          path: |
+            build/winapk-elfrun.exe
+            build/winapk-jvm-run.exe

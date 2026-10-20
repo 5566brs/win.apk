@@ -55,4 +55,10 @@ JNIEnv* guest_env_for_current_thread();
 // callbacks that are handed a guest env). nullptr if not a guest env.
 JNIEnv* host_env_of(JNIEnv* guest);
 
+// Sets the calling thread's guest JNIEnv to wrap `host` and returns it. This is
+// the host->guest translation a native-method thunk performs on the JNIEnv*
+// HotSpot passes (the env_xlate argument to make_jni_native_thunk). It is an
+// ordinary Microsoft x64 function, as the thunk expects.
+JNIEnv* guest_env_wrapping(JNIEnv* host);
+
 }  // namespace winapk

@@ -206,6 +206,8 @@ JNIEnv* host_env_of(JNIEnv* guest) {
     return g ? g->host : nullptr;
 }
 
+JNIEnv* guest_env_wrapping(JNIEnv* host) { return host ? wrap_host_env(host) : nullptr; }
+
 void guest_jni_set_signature_provider(SignatureProvider provider, void* ctx) {
     g_sig_provider = provider;
     g_sig_ctx = ctx;

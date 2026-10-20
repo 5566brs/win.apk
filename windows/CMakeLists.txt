@@ -61,9 +61,15 @@ if(WINAPK_JNI_INCLUDE)
   add_executable(winapk-jni-variadic-test test/jni_variadic_test.cpp)
   target_link_libraries(winapk-jni-variadic-test PRIVATE winapk_jni)
 
+  # The real-JVM end-to-end harness. It loads jvm.dll at runtime (not linked),
+  # so it only needs the JNI/JVMTI headers.
+  add_executable(winapk-jvm-run tools/jvmrun_main.cpp)
+  target_link_libraries(winapk-jvm-run PRIVATE winapk_jni)
+
   if(MINGW)
     target_link_options(winapk-jni-test PRIVATE -static)
     target_link_options(winapk-jni-variadic-test PRIVATE -static)
+    target_link_options(winapk-jvm-run PRIVATE -static)
   endif()
 else()
   message(STATUS "WINAPK_JNI_INCLUDE not set; skipping the JNI wrapper target (winapk_jni, winapk-jni-test)")

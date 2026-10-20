@@ -32,6 +32,7 @@ fall into three groups:
 | `tools/gen_jni_slots.py`, `src/jni_slots.inc` | Generated `JNINativeInterface_` slot table (235 slots) the guest `JNIEnv` wrapper is built from |
 | `include/winapk/guest_jni.h`, `src/guest_jni.cpp` | The guest `JNIEnv`/`JavaVM` wrapper: per-thread guest env, a generic System V forwarder into HotSpot's table for every non-variadic slot, and `GetEnv`/`Attach`/`Detach`. Needs a JDK's `jni.h` at build time (`-DWINAPK_JNI_INCLUDE=$JAVA_HOME/include`) |
 | `include/winapk/jni_variadic.h`, `src/jni_variadic.cpp` | The variadic `Call<T>Method` / `...V` / `NewObject` bridge (31 families, one template keyed on the `...A` slot): reads the argument stream against the method signature and repacks it into the `jvalue[]` of HotSpot's A-form. Needs a `SignatureProvider` (JVMTI-backed in the real host, a map in tests) |
+| `tools/jvmrun_main.cpp` | `winapk-jvm-run`: the real-JVM end-to-end test. Creates a HotSpot JVM, loads an Android x86_64 `.so`, binds its native method through the host→guest thunk, and calls it from Java; the native calls back into Java through the guest `JNIEnv`. `test/guest/jni_guest.c` + `test/java/WinApkJniTest.java` are its inputs; `test/build_e2e.sh` builds them and `test/run_e2e_wine.sh` runs it under Wine |
 
 What the PoC checks: int/double/stack arguments across the ABI boundary, RELATIVE,
 `R_X86_64_64`, GLOB_DAT/JUMP_SLOT, RELR and Android APS2 relocations, `DT_INIT_ARRAY`,
@@ -61,8 +62,9 @@ broken SEH unwind data for `sysv_abi` functions.
 
 ## Known limits of the PoC (on purpose, for now)
 
-- **Variadic calls** (`printf`, `__android_log_print`, JNI `Call*Method`): the
-  System V and Windows `va_list` layouts differ, so these need dedicated bridges.
+- **Variadic libc calls** (`printf`, `__android_log_print`): the System V and
+  Windows `va_list` layouts differ, so these still need dedicated shim bridges.
+  (The variadic JNI `Call*Method` families are done — see `jni_variadic.cpp`.)
 - **ELF TLS** (`PT_TLS`, TLS relocations) and `%fs:0` (`__get_tls`): refused with
   a clear error. They need a decoder-driven rewrite (Zydis) instead of the 9-byte
   pattern match used for the stack guard.
@@ -77,14 +79,19 @@ broken SEH unwind data for `sysv_abi` functions.
 ## Roadmap
 
 - [x] **Phase 0**: repository, CI on a real Windows runner, upstream kept intact
-- [ ] **Phase 1**: loader proof of concept (this directory). Done under Wine;
-      the CI run on Windows decides
-- [ ] **Phase 2**: Java-only apps: JVM host, window/input (`NativeCocoa` → Win32),
-      ANGLE on D3D11, WASAPI audio, paths under `%LOCALAPPDATA%`
+- [x] **Phase 1**: Android x86_64 ELF loader proof of concept, verified on Windows CI
+- [x] **JNI bridge core**: the System V `JNIEnv`/`JavaVM` wrapper, the variadic
+      `Call*Method` families, host→guest native-method thunks, and a real-JVM
+      end-to-end test (load an Android x86_64 `.so`, bind its native, call it
+      from Java, call back into Java) — all green on Windows CI
+- [ ] **Phase 2**: Java-only apps: JVM host wired to app launch, window/input
+      (`NativeCocoa` → Win32), ANGLE on D3D11, WASAPI audio, paths under
+      `%LOCALAPPDATA%`, and the Java-side binding glue (`AppClassLoader`,
+      `ArtJniLibraryOrder`) reused from upstream
 - [ ] **Phase 3**: x86_64 native apps: full Bionic shim (fd table, epoll/eventfd,
-      pthread, mmap, signals over VEH), JNI bridge (System V `JNIEnv`), variadic
-      bridges, ELF TLS, Vulkan, NativeActivity, picking the x86_64 split from
-      `.apkm`/`.xapk`/`.apks`
+      pthread, mmap, signals over VEH), lazy `Java_*` binding via JVMTI
+      NativeMethodBind, ELF TLS, Vulkan, NativeActivity, picking the x86_64 split
+      from `.apkm`/`.xapk`/`.apks`
 - [ ] **Phase 4**: system services: WebView2, Media Foundation, location,
       gamepads, clipboard, file pickers, Google sign-in in the browser
 - [ ] **Phase 5**: control panel, installer, Start-menu shortcuts per app,
