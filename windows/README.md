@@ -28,6 +28,8 @@ fall into three groups:
 | `src/mini_bionic.cpp` | First slice of the Windows Bionic shim (sysv_abi wrappers over the UCRT) |
 | `tools/elfrun_main.cpp` | `winapk-elfrun`: loads `.so` files and runs the PoC checks |
 | `test/guest/poc_guest.c` | The Android x86_64 test library |
+| `include/winapk/abi_thunk.h`, `src/abi_thunk.cpp` | Runtime machine-code thunks for the JNI bridge: Microsoft→System V native-method thunks (per Java descriptor) and the System V variadic `va_list` entry stub (phase 2 groundwork) |
+| `tools/gen_jni_slots.py`, `src/jni_slots.inc` | Generated `JNINativeInterface_` slot table (237 slots) that the guest `JNIEnv` wrapper will be built from |
 
 What the PoC checks: int/double/stack arguments across the ABI boundary, RELATIVE,
 `R_X86_64_64`, GLOB_DAT/JUMP_SLOT, RELR and Android APS2 relocations, `DT_INIT_ARRAY`,
