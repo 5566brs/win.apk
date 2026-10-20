@@ -58,6 +58,7 @@ jobs:
         with:
           msystem: CLANG64
           update: true
+          install: unzip
           pacboy: >-
             clang:p
             cmake:p
@@ -85,6 +86,34 @@ jobs:
         run: |
           export PATH="$(cygpath -u "$JAVA_HOME")/bin/server:$(cygpath -u "$JAVA_HOME")/bin:$PATH"
           ./build/winapk-jvm-run.exe guest/e2e/libwinapk_jni_guest.so guest/e2e/classes
+      # M1 smoke test: stage the runtime, boot a small open-source Java-only
+      # APK headless and check that it presents frames.
+      - uses: actions/cache@v4
+        with:
+          path: thirdparty/framework-res
+          key: framework-res-${{ hashFiles('scripts/build_framework_res.sh', 'windows/scripts/build_framework_res.sh') }}
+      - name: Stage the runtime
+        run: |
+          export JAVA_HOME="$(cygpath -u "$JAVA_HOME")"
+          windows/scripts/stage_runtime.sh build runtime
+      - name: Boot an APK headless
+        run: |
+          # F-Droid moves old versions to its archive, so try both.
+          apk=org.secuso.privacyfriendlysudoku_101.apk
+          curl -sSfL -o sudoku.apk "https://f-droid.org/repo/$apk" \
+            || curl -sSfL -o sudoku.apk "https://f-droid.org/archive/$apk"
+          export WINAPK_HEADLESS_EXIT_AFTER_FRAMES=30
+          export WINAPK_HEADLESS_FRAME="$(cygpath -w "$PWD/frame.bmp")"
+          timeout 600 ./runtime/bin/winapk-runtime.exe --apk sudoku.apk --jdk "$JAVA_HOME" --data "$(cygpath -w "$PWD/appdata")" \
+            > boot.log 2>&1 || { tail -n 200 boot.log; exit 1; }
+          grep -E "first frame presented|frames presented" boot.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: headless-boot
+          path: |
+            boot.log
+            frame.bmp
       - uses: actions/upload-artifact@v4
         with:
           name: winapk-binaries

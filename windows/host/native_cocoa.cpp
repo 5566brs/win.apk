@@ -11,7 +11,9 @@
 // headless version runs that tick on its own 60 Hz thread. Frames come back
 // through presentBitmap. With WINAPK_HEADLESS_FRAME set to a
 // file path, the latest one is written there as a BMP, which is how a headless
-// run shows that the app really drew something.
+// run shows that the app really drew something. WINAPK_HEADLESS_EXIT_AFTER_FRAMES
+// ends the process with exit code 0 once that many frames were presented,
+// which is what the CI smoke test waits for.
 
 #include "host_natives.h"
 
@@ -199,6 +201,15 @@ void JNICALL Cocoa_presentBitmap(JNIEnv* env, jclass, jintArray argb, jint w, ji
         const DWORD n = GetEnvironmentVariableW(L"WINAPK_HEADLESS_FRAME", buf, MAX_PATH * 4);
         return (n > 0 && n < MAX_PATH * 4) ? std::wstring(buf, n) : std::wstring();
     }();
+    static const long exit_after = [] {
+        const char* e = std::getenv("WINAPK_HEADLESS_EXIT_AFTER_FRAMES");
+        return (e && *e) ? std::atol(e) : 0L;
+    }();
+    if (exit_after > 0 && frame > exit_after) {
+        std::fprintf(stderr, "[win.apk] %ld frames presented; exiting as WINAPK_HEADLESS_EXIT_AFTER_FRAMES asks\n",
+                     exit_after);
+        Cocoa_exitProcess(env, nullptr, 0, nullptr);
+    }
     if (path.empty() || !argb || w <= 0 || h <= 0 || env->GetArrayLength(argb) < w * h) return;
     static std::mutex lock;
     std::lock_guard<std::mutex> hold(lock);

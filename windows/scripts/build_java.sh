@@ -25,7 +25,8 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 RT="$(cd -- "$HERE/../../runtime" >/dev/null 2>&1 && pwd)"
 OUT="${1:-$HERE/../build/runtime}"
 LIB="$OUT/lib"
-TMP="$OUT/classes"
+WORK="$OUT/.build"  # scratch: classes, file lists, javac log
+TMP="$WORK/classes"
 
 if [[ -n "${JAVA_HOME:-}" ]]; then
     JAVAC="$JAVA_HOME/bin/javac"
@@ -41,14 +42,14 @@ rm -rf "$TMP"
 mkdir -p "$TMP" "$LIB"
 
 echo "[build_java] compiling runtime/java..."
-LIST="$OUT/java.list"
+LIST="$WORK/java.list"
 # Paths go into an @file, which splits on spaces; upstream skips Finder
 # conflict copies ("Foo 2.java") the same way.
 find "$RT/java" -name '*.java' ! -path '* [2-9].java' | sort > "$LIST"
 # Upstream's sources produce a few dozen warnings (sun.misc.Unsafe use) that
 # -nowarn does not silence, so the output goes to a log shown only on failure.
-if ! "$JAVAC" -J-Xmx2g -d "$TMP" --release 21 -nowarn -Xlint:-options @"$LIST" > "$OUT/javac.log" 2>&1; then
-    cat "$OUT/javac.log" >&2
+if ! "$JAVAC" -J-Xmx2g -d "$TMP" --release 21 -nowarn -Xlint:-options @"$LIST" > "$WORK/javac.log" 2>&1; then
+    cat "$WORK/javac.log" >&2
     echo "[build_java] javac failed" >&2
     exit 1
 fi
@@ -56,9 +57,9 @@ fi
 # The resolver provider is a separate pass: it needs the running JDK's API
 # rather than --release 21.
 if [[ -d "$RT/net_spi" ]]; then
-    find "$RT/net_spi" -name '*.java' ! -path '* [2-9].java' | sort > "$OUT/net_spi.list"
-    if [[ -s "$OUT/net_spi.list" ]]; then
-        "$JAVAC" -d "$TMP" -nowarn -Xlint:-options @"$OUT/net_spi.list"
+    find "$RT/net_spi" -name '*.java' ! -path '* [2-9].java' | sort > "$WORK/net_spi.list"
+    if [[ -s "$WORK/net_spi.list" ]]; then
+        "$JAVAC" -d "$TMP" -nowarn -Xlint:-options @"$WORK/net_spi.list"
     fi
     if [[ -d "$RT/net_spi/META-INF/services" ]]; then
         mkdir -p "$TMP/META-INF/services"
@@ -73,8 +74,8 @@ patch_module() {  # patch_module <module> <source dir> <out dir>
     echo "[build_java] compiling ${src#"$RT"/} (--patch-module $module)..."
     rm -rf "$dst"
     mkdir -p "$dst"
-    find "$src" -name '*.java' | sort > "$OUT/$module.list"
-    "$JAVAC" -nowarn --patch-module "$module=$src" -d "$dst" @"$OUT/$module.list"
+    find "$src" -name '*.java' | sort > "$WORK/$module.list"
+    "$JAVAC" -nowarn --patch-module "$module=$src" -d "$dst" @"$WORK/$module.list"
 }
 patch_module java.base "$RT/java_base_patch" "$LIB/java_base_patch"
 patch_module jdk.unsupported "$RT/jdk_unsupported_patch" "$LIB/jdk_unsupported_patch"
@@ -86,8 +87,8 @@ if [[ -d "$RT/java/com/macapk/loader/keybinds" ]]; then
 fi
 
 echo "[build_java] packaging..."
-( cd "$TMP" && find . -type f -name '*.class' ! -path './com/macapk/*' | sort > "$OUT/framework.list" )
-( cd "$TMP" && "$JAR" --create --file "$LIB/android-framework.jar" @"$OUT/framework.list" )
+( cd "$TMP" && find . -type f -name '*.class' ! -path './com/macapk/*' | sort > "$WORK/framework.list" )
+( cd "$TMP" && "$JAR" --create --file "$LIB/android-framework.jar" @"$WORK/framework.list" )
 if compgen -G "$RT/fonts/*.ttf" > /dev/null; then
     mkdir -p "$TMP/fonts"
     cp -f "$RT"/fonts/*.ttf "$TMP/fonts/"
