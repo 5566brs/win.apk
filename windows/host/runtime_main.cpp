@@ -174,25 +174,42 @@ bool convert_dex(const Options& o, const fs::path& app_dir, fs::path* jar) {
     return !ec;
 }
 
-// Step 1, for a split bundle (.apkm, .xapk, .apks): install it as base.apk
-// plus split_*.apk, the layout upstream's runtime and converter read
-// (com.winapk.tools.BundleInstall), once per bundle file. Afterwards the app
-// is the installed base.apk. The set lives in `dir` (<data>\app\<name>), apart
-// from the code dir, as on a device (data/app) and on the Mac: Boot moves
-// anything in the code dir it does not know as its own into the data dir.
-bool install_bundle(Options* o, const fs::path& dir) {
-    std::wstring ext = o->apk.extension().wstring();
-    std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
-    if (ext != L".apkm" && ext != L".xapk" && ext != L".apks") return true;
+// Step 1: install the app the way a device's installer does, into
+// <android root>\data\app\~~<nonce>\<package>-<nonce>: base.apk (a hard link
+// to a plain APK, or unpacked from a bundle) plus split_*.apk, and the native
+// libraries of this host's ABI under lib\<isa>. Upstream's runtime and its DEX
+// converter recognize an installed app only in that layout
+// (com.winapk.tools.AppInstall). Done once per input file; a small record next
+// to the installs names the result. Afterwards the app is the installed
+// base.apk.
+bool install_app(Options* o, const fs::path& android_root) {
     std::error_code ec;
-    const fs::path base = dir / "base.apk";
-    if (!(fs::exists(base, ec) && fs::last_write_time(base, ec) >= fs::last_write_time(o->apk, ec))) {
-        std::fprintf(stderr, "[win.apk] installing the bundle's APKs (once per install)...\n");
+    const fs::path apps = android_root / "data" / "app";
+    fs::create_directories(apps, ec);
+    const fs::path record = apps / (L"." + o->apk.stem().wstring() + L".installed");
+    auto installed = [&]() -> fs::path {
+        if (!fs::exists(record, ec) || fs::last_write_time(record, ec) < fs::last_write_time(o->apk, ec)) return {};
+        FILE* f = _wfopen(record.c_str(), L"rb");
+        if (!f) return {};
+        std::string path;
+        char buf[1024];
+        for (size_t n; (n = std::fread(buf, 1, sizeof(buf), f)) > 0;) path.append(buf, n);
+        std::fclose(f);
+        const int len = MultiByteToWideChar(CP_UTF8, 0, path.data(), static_cast<int>(path.size()), nullptr, 0);
+        std::wstring w(static_cast<size_t>(len > 0 ? len : 0), L'\0');
+        if (len > 0) MultiByteToWideChar(CP_UTF8, 0, path.data(), static_cast<int>(path.size()), &w[0], len);
+        const fs::path base(w);
+        return fs::exists(base, ec) ? base : fs::path();
+    };
+    fs::path base = installed();
+    if (base.empty()) {
+        std::fprintf(stderr, "[win.apk] installing the app (once per install)...\n");
         const int rc = run_process(quoted(o->jdk / "bin" / "java.exe") + L" -cp " +
-                                   quoted(o->lib / "winapk-tools.jar") + L" com.winapk.tools.BundleInstall " +
-                                   quoted(o->apk) + L" " + quoted(dir));
-        if (rc != 0) {
-            std::fprintf(stderr, "[win.apk] installing the bundle failed (exit code %d)\n", rc);
+                                   quoted(o->lib / "winapk-tools.jar") + L" com.winapk.tools.AppInstall " +
+                                   quoted(o->apk) + L" " + quoted(android_root) + L" x86_64 " + quoted(record));
+        base = rc == 0 ? installed() : fs::path();
+        if (base.empty()) {
+            std::fprintf(stderr, "[win.apk] installing the app failed (exit code %d)\n", rc);
             return false;
         }
     }
@@ -352,7 +369,7 @@ int wmain(int argc, wchar_t** argv) {
         std::fprintf(stderr, "[win.apk] cannot create %s\n", utf8(b.app_dir.wstring()).c_str());
         return 1;
     }
-    if (!install_bundle(&b.options, b.options.data / "app" / b.options.apk.stem())) return 1;
+    if (!install_app(&b.options, b.options.data / "android")) return 1;
     if (!convert_dex(b.options, b.app_dir, &b.app_jar)) return 1;
 
     // Upstream runs the JVM with -Xss16m; give the creating thread as much.

@@ -194,8 +194,10 @@ public final class InstalledSplits {
         // an empty sibling (the shim's install-dir materialiser mkdirs
         // lib/arm64 for a guest that opens /data/app, even on an arm app)
         // cannot shadow the populated one.
+        // The host's own instruction set first (x86_64 on Windows x64).
+        String hostIsa = isaOf(android.os.Build.CPU_ABI);
         File firstDir = null;
-        for (String isa : new String[] { "arm64", "arm" }) {
+        for (String isa : new String[] { hostIsa, "arm64", "arm" }) {
             File d = new File(libRoot, isa);
             if (!d.isDirectory()) continue;
             if (firstDir == null) firstDir = d;
@@ -203,7 +205,7 @@ public final class InstalledSplits {
             if (kids != null && kids.length > 0) return d;
         }
         if (firstDir != null) return firstDir;
-        return new File(libRoot, "arm64");
+        return new File(libRoot, hostIsa);
     }
 
     public static boolean isSplitFileName(String name) {

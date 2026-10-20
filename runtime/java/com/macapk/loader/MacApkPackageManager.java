@@ -1652,8 +1652,10 @@ public final class MacApkPackageManager extends PackageManager {
                     // The primary instruction set the installer extracted (apk_unpacker
                     // AbiToIsa: arm64-v8a -> arm64, armeabi[-v7a] -> arm); arm64 when the
                     // package ships no native code, as a device reports its own ISA.
-                    String isa = new java.io.File(libRoot, "arm64").isDirectory() ? "arm64"
-                               : new java.io.File(libRoot, "arm").isDirectory() ? "arm" : "arm64";
+                    String hostIsa = InstalledSplits.isaOf(android.os.Build.CPU_ABI);
+                    String isa = new java.io.File(libRoot, hostIsa).isDirectory() ? hostIsa
+                               : new java.io.File(libRoot, "arm64").isDirectory() ? "arm64"
+                               : new java.io.File(libRoot, "arm").isDirectory() ? "arm" : hostIsa;
                     ai.nativeLibraryDir = new java.io.File(libRoot, isa).getAbsolutePath();
                 }
             }

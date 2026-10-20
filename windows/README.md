@@ -139,6 +139,11 @@ Windows hook is unavoidable, and every such change is listed here:
 - `runtime/java/android/security/keystore/AndroidKeyStoreKeyFactorySpi.java`:
   delegates to the other providers only, instead of recursing into itself
   until the stack overflows. Not Windows-specific.
+- `runtime/java/android/os/Build.java`, `dalvik/system/VMRuntime.java`,
+  `com/macapk/loader/Boot.java` (`os.arch`), `InstalledSplits.java` and
+  `MacApkPackageManager.java`: the device ABI is the host's, so x86_64 on
+  Windows x64, and the native library directory includes `lib/x86_64`. On the
+  Mac nothing changes. `Boot.java` also looks for `bin/macapk-translator.exe`.
 - `runtime/java/android/content/Context.java`: `getDatabasePath` also takes a
   drive-letter path as absolute, so a database named by its full path is not
   nested inside `databases\`.

@@ -81,7 +81,7 @@ public final class VMRuntime {
     public String vmInstructionSet() {
         String p = System.getProperty("macapk.vm.instructionSet");
         if (p != null && !p.isEmpty()) return p;
-        return is64Bit() ? "arm64-v8a" : "armeabi-v7a";
+        return is64Bit() ? android.os.Build.CPU_ABI : "armeabi-v7a";
     }
 
     /** AOSP: the runtime backing library; on modern Android this is "libart.so". */

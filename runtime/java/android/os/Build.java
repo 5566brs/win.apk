@@ -19,14 +19,21 @@
 package android.os;
 
 public class Build {
+    private static String macapkHostAbi() {
+        String arch = System.getProperty("os.arch", "");
+        return ("amd64".equals(arch) || "x86_64".equals(arch)) ? "x86_64" : "arm64-v8a";
+    }
+
     public static final String UNKNOWN     = "unknown";
     public static final String BOARD       = "macapk";
     public static final String BOOTLOADER  = "unknown";
     public static final String BRAND       = "Mac.apk";
-    public static final String CPU_ABI     = "arm64-v8a";
+    // The device's ABI is the host's: an x86_64 host (Win.apk on Windows x64)
+    // runs x86_64 apps natively, and every other host presents arm64-v8a.
+    public static final String CPU_ABI     = macapkHostAbi();
     public static final String CPU_ABI2    = "";
-    public static final String[] SUPPORTED_ABIS    = { "arm64-v8a" };
-    public static final String[] SUPPORTED_64_BIT_ABIS = { "arm64-v8a" };
+    public static final String[] SUPPORTED_ABIS    = { CPU_ABI };
+    public static final String[] SUPPORTED_64_BIT_ABIS = { CPU_ABI };
     public static final String[] SUPPORTED_32_BIT_ABIS = {};
     public static final String DEVICE      = "macapk";
     public static final String DISPLAY     = "Mac.apk-1";

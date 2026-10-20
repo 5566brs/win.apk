@@ -1238,7 +1238,11 @@ public final class Boot {
         // after VM init (verified: changing it post-init doesn't
         // disturb GC / classloader / module logic).
         System.setProperty("os.name", "Linux");
-        System.setProperty("os.arch", "aarch64");
+        // uname's machine, as Android reports it: x86_64 on an x86_64 host
+        // (Win.apk on Windows x64, whose apps are x86_64), aarch64 elsewhere.
+        String hostArch = System.getProperty("os.arch", "");
+        System.setProperty("os.arch",
+            "amd64".equals(hostArch) || "x86_64".equals(hostArch) ? "x86_64" : "aarch64");
         // os.name / os.arch / os.version are ONE triple on Android: libcore's
         // System.initUnchangeableSystemProperties fills all three from a single
         // uname() -- p.put("os.name", info.sysname); p.put("os.arch",
@@ -3467,6 +3471,7 @@ public final class Boot {
             String[] candidates = {
                 "bin/macapk-translator",
                 "macapk-translator",
+                "bin/macapk-translator.exe",  // the Windows host's
             };
             for (String rel : candidates) {
                 File c = new File(buildDir, rel);
