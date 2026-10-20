@@ -19,6 +19,7 @@
 
 #include "host_natives.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -210,6 +211,13 @@ std::vector<std::string> jvm_options(const BootArgs& b) {
     v.push_back("-Dmacapk.android.root=" + jvm_path(android_root));
     v.push_back("-Dmacapk.bundle.apk=" + jvm_path(o.apk));
     v.push_back("-XX:ErrorFile=" + jvm_path(logs) + "\\hs_err_pid%p.log");
+    // Extra options, space-separated, as upstream reads them.
+    const std::string extra = utf8(env_var(L"MACAPK_JVM_OPTS"));
+    for (size_t i = 0; i < extra.size();) {
+        const size_t j = std::min(extra.find(' ', i), extra.size());
+        if (j > i) v.push_back(extra.substr(i, j - i));
+        i = j + 1;
+    }
     return v;
 }
 

@@ -10,10 +10,30 @@
 
 #pragma once
 
+#include <cstddef>
+
 #include <jni.h>
 #include <jvmti.h>
 
 namespace winapk::host {
+
+// One Windows implementation of a host native method.
+struct HostMethod {
+    const char* clazz;  // binary name, "com.macapk.loader.NativeLog"
+    JNINativeMethod method;
+};
+
+struct HostMethods {
+    const HostMethod* methods;
+    size_t count;
+};
+
+#define WINAPK_HOST_NATIVE(clazz, name, sig, fn) \
+    {clazz, {const_cast<char*>(name), const_cast<char*>(sig), reinterpret_cast<void*>(&fn)}}
+
+// The implementations, one file per Java class.
+HostMethods native_log_methods();    // native_log.cpp
+HostMethods native_cocoa_methods();  // native_cocoa.cpp (headless for now)
 
 struct NativeStats {
     int classes = 0;        // host classes found
