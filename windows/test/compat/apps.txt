@@ -1,11 +1,9 @@
-# The compatibility sweep's app corpus: open-source apps from F-Droid that
-# ship no native libraries, pinned to one version each so results compare
-# across runs. One "package versionCode" per line; the APK is fetched from
+# The compatibility sweep's app corpus: open-source apps from F-Droid, pinned
+# to one version each so results compare across runs. One "package versionCode" per line; the APK is fetched from
 # https://f-droid.org/repo/<package>_<versionCode>.apk (or /archive/ once
 # F-Droid retires the version).
 #
-# Selected 2026-10-20 from 44 candidates; the other 22 ship native code
-# (all of them with an x86_64 build) and wait for the native-library work.
+# Without native libraries, selected 2026-10-20 from 44 candidates:
 com.github.muellerma.coffee 47
 org.secuso.privacyfriendlysudoku 101
 org.secuso.privacyfriendlynotes 105
@@ -28,3 +26,23 @@ de.reimardoeffinger.quickdic 134
 ch.blinkenlights.android.vanilla 13200
 com.vonglasow.michael.satstat 30600
 org.ligi.passandroid 373
+
+# With x86_64 native libraries (milestone M4 onward). The two small androidx
+# libraries (Compose's graphics.path, DataStore's shared counter) are in most
+# current apps; the rest cover libGDX, SDL, Rust, CameraX and plain JNI.
+dk.cocode.chess 5020
+de.moekadu.tuner 50
+com.wbrawner.simplemarkdown.free 62
+me.haroldmartin.golwallpaper 3
+net.multun.gamecounter.fdroid 14
+org.unifiedpush.distributor.nextpush 54
+cn.super12138.todo 1295
+micro.repl.ma7moud3ly 18
+ogz.tripeaks 36
+dev.lonami.klooni 860
+com.github.m374lx.alexvsbus 5
+se.voxelmanip.tensy 2
+de.markusfisch.android.shadereditor 94
+eu.faircode.netguard 2026080101
+com.kunzisoft.keepass.libre 45500
+com.ichi2.anki 22502300

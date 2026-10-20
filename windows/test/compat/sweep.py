@@ -16,8 +16,9 @@ log and the last frame. Each run gets one status:
     crashed   the process ended on its own before that (exit code != 0)
 
 It then collects, per app, the host natives that were called while still
-stubbed, the exceptions Java logged, and a HotSpot crash file if there was
-one, and writes report.json and report.md with the problems sorted by the
+stubbed, the exceptions Java logged, a HotSpot crash file if there was one,
+and for the app's own native code the system functions it called that the
+shim does not have yet and the libraries that could not be loaded, and writes report.json and report.md with the problems sorted by the
 number of apps they appear in. That ranking is what decides what to fix next:
 a fix to the framework or the host helps every app the problem shows up in.
 
@@ -46,6 +47,10 @@ THREW_RE = re.compile(r"threw ([\w.$]+(?:Exception|Error))(?::\s*(.*?))?(?: -- c
 # A bare stack-trace head: "java.lang.IllegalStateException: msg"
 TRACE_RE = re.compile(r"^([a-z][\w.]*\.[A-Z][\w$]*(?:Exception|Error))(?::\s*(.*))?$")
 FRAMES_RE = re.compile(r"\[win\.apk\] (\d+) frames presented")
+# An app's own native code (host/guest_libs.cpp): a system function the shim
+# does not have yet, and a library that could not be loaded at all.
+GUEST_MISSING_RE = re.compile(r"guest called a system function not implemented on Windows yet, returning 0: (\S+)")
+GUEST_LOAD_RE = re.compile(r"\[win\.apk\] cannot load (\S+?\.so): (?:cannot load \"[^\"]*\": )?(.*)$")
 
 
 def read_apps(path, only):
@@ -143,6 +148,11 @@ def run_app(pkg, apk, args, out):
 
 def analyze(pkg, text, code, timed_out, seconds, frame_path, out):
     stubs = sorted(set(STUB_RE.findall(text)))
+    guest_missing = sorted(set(GUEST_MISSING_RE.findall(text)))
+    # Why a library failed, with the path cut to the file name; the reason is
+    # what ranks (the same gap shows up in many apps).
+    load_failures = sorted(set(f"{os.path.basename(lib.replace(chr(92), '/'))}: {why[:160]}"
+                               for lib, why in GUEST_LOAD_RE.findall(text)))
     exceptions = collections.OrderedDict()
     for line in text.splitlines():
         line = line.strip()
@@ -171,6 +181,8 @@ def analyze(pkg, text, code, timed_out, seconds, frame_path, out):
         "frame_colors": colors,
         "jvm_crash": hs_err,
         "stubbed_natives": stubs,
+        "guest_missing": guest_missing,
+        "guest_load_failures": load_failures,
         "exceptions": exceptions,
     }
 
@@ -203,6 +215,16 @@ def write_report(results, out):
     lines += ["", "## Stubbed natives, by number of apps that called them", "",
               "| Apps | Native |", "|---|---|"]
     lines += [f"| {n} | `{name}` |" for name, n in stubs.most_common()]
+    missing, _ = rank(results, "guest_missing")
+    lines += ["", "## System functions the app's native code called, missing on Windows", "",
+              "| Apps | Function |", "|---|---|"]
+    lines += [f"| {n} | `{name}` |" for name, n in missing.most_common()]
+    reasons = collections.Counter()
+    for r in results:
+        for f in set(f.split(": ", 1)[1] for f in r["guest_load_failures"]):
+            reasons[f] += 1
+    lines += ["", "## Native libraries that could not be loaded, by reason", "", "| Apps | Reason |", "|---|---|"]
+    lines += [f"| {n} | {why.replace('|', '/')} |" for why, n in reasons.most_common()]
     exc, sample = rank(results, "exceptions")
     lines += ["", "## Exceptions, by number of apps", "", "| Apps | Exception | First seen in |", "|---|---|---|"]
     for name, n in exc.most_common():
@@ -240,7 +262,8 @@ def main():
             continue
         r = run_app(pkg, apk, args, out)
         print(f"[sweep] {pkg}: {r['status']} in {r['seconds']} s, {len(r['stubbed_natives'])} stubbed natives, "
-              f"{len(r['exceptions'])} exceptions", flush=True)
+              f"{len(r['exceptions'])} exceptions, {len(r['guest_missing'])} missing system functions, "
+              f"{len(r['guest_load_failures'])} libraries not loaded", flush=True)
         results.append(r)
         shutil.rmtree(os.path.join(out, "data", pkg), ignore_errors=True)
     print(write_report(results, out))
