@@ -13,8 +13,10 @@
 // presentBitmap. With WINAPK_HEADLESS_FRAME set to a
 // file path, the latest one is written there as a BMP, which is how a headless
 // run shows that the app really drew something. WINAPK_HEADLESS_EXIT_AFTER_FRAMES
-// ends the process with exit code 0 once that many frames were presented,
-// which is what the CI smoke test waits for.
+// ends the process with exit code 0 that many display frames after the first
+// presented one, which is what the CI smoke test waits for. It counts display
+// frames, not presented ones: an app that draws once and then sits idle
+// presents nothing more, and still has to finish.
 
 #include "host_natives.h"
 
@@ -197,11 +199,16 @@ bool check_tick_exception(JNIEnv* env) {
     return true;
 }
 
+void JNICALL Cocoa_exitProcess(JNIEnv*, jclass, jint code, jstring);
+
 DWORD WINAPI render_thread(void*) {
     JNIEnv* env = nullptr;
     JavaVMAttachArgs args{JNI_VERSION_1_6, const_cast<char*>("winapk-render"), nullptr};
     if (g_vm->AttachCurrentThreadAsDaemon(reinterpret_cast<void**>(&env), &args) != JNI_OK) return 1;
     const float density = device_density(env);
+    const char* e = std::getenv("WINAPK_HEADLESS_EXIT_AFTER_FRAMES");
+    const long exit_after = (e && *e) ? std::atol(e) : 0L;
+    long ticks_since_first = 0;
     jmethodID changed = nullptr, draw = nullptr;
     for (;;) {
         Sleep(16);
@@ -228,6 +235,13 @@ DWORD WINAPI render_thread(void*) {
         env->CallVoidMethod(renderer, draw);
         check_tick_exception(env);
         env->DeleteLocalRef(renderer);
+        if (exit_after > 0 && g_frames > 0 && ++ticks_since_first >= exit_after) {
+            std::fprintf(stderr,
+                         "[win.apk] %ld frames presented in %ld display frames; exiting as "
+                         "WINAPK_HEADLESS_EXIT_AFTER_FRAMES asks\n",
+                         g_frames.load(), ticks_since_first);
+            Cocoa_exitProcess(env, nullptr, 0, nullptr);
+        }
     }
 }
 
@@ -307,15 +321,6 @@ void JNICALL Cocoa_presentBitmap(JNIEnv* env, jclass, jintArray argb, jint w, ji
         const DWORD n = GetEnvironmentVariableW(L"WINAPK_HEADLESS_FRAME", buf, MAX_PATH * 4);
         return (n > 0 && n < MAX_PATH * 4) ? std::wstring(buf, n) : std::wstring();
     }();
-    static const long exit_after = [] {
-        const char* e = std::getenv("WINAPK_HEADLESS_EXIT_AFTER_FRAMES");
-        return (e && *e) ? std::atol(e) : 0L;
-    }();
-    if (exit_after > 0 && frame > exit_after) {
-        std::fprintf(stderr, "[win.apk] %ld frames presented; exiting as WINAPK_HEADLESS_EXIT_AFTER_FRAMES asks\n",
-                     exit_after);
-        Cocoa_exitProcess(env, nullptr, 0, nullptr);
-    }
     if (!argb || w <= 0 || h <= 0 || env->GetArrayLength(argb) < w * h) return;
     if (path.empty() && !window_running()) return;
     jint* px = env->GetIntArrayElements(argb, nullptr);

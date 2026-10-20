@@ -91,7 +91,8 @@ do not render yet. App data goes to `%LOCALAPPDATA%\Win.apk`.
 
 For tests, `WINAPK_HEADLESS=1` runs without a window,
 `WINAPK_HEADLESS_FRAME=frame.bmp` saves the last frame the app drew, and
-`WINAPK_HEADLESS_EXIT_AFTER_FRAMES=30` stops after a number of frames. On
+`WINAPK_HEADLESS_EXIT_AFTER_FRAMES=30` exits that many display frames after the
+first one the app presents (an idle app counts too). On
 Linux, `windows/test/run_app_wine.sh` boots an APK headless under Wine.
 
 ## Status and next steps

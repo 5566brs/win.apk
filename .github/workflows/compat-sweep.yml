@@ -14,6 +14,10 @@ on:
       - 'windows/**'
       - 'runtime/java/**'
       - '.github/workflows/compat-sweep.yml'
+  pull_request:
+    paths:
+      - 'windows/test/compat/**'
+      - '.github/workflows/compat-sweep.yml'
 
 permissions:
   contents: read

@@ -10,9 +10,9 @@ For each app it runs winapk-runtime with WINAPK_HEADLESS=1 and a fresh data
 directory, waits for --frames presented frames (or the timeout), and keeps the
 log and the last frame. Each run gets one status:
 
-    drew      presented the frames, and the last frame has real content
-    blank     presented the frames, but the last frame is one or two colors
-    no-frame  ran until the timeout without presenting the frames
+    drew      ran its frames, and the last frame has real content
+    blank     ran its frames, but the last frame is one or two colors
+    no-frame  ran until the timeout without presenting a frame
     crashed   the process ended on its own before that (exit code != 0)
 
 It then collects, per app, the host natives that were called while still
