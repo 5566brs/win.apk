@@ -56,7 +56,7 @@ endif()
 # JDK-free, so the elf-loader and thunk targets build without a JDK.
 set(WINAPK_JNI_INCLUDE "" CACHE PATH "JDK include dir (contains jni.h and win32/jni_md.h)")
 if(WINAPK_JNI_INCLUDE)
-  add_library(winapk_jni STATIC src/guest_jni.cpp src/jni_variadic.cpp)
+  add_library(winapk_jni STATIC src/guest_jni.cpp src/jni_variadic.cpp src/jni_bind.cpp)
   target_include_directories(winapk_jni PUBLIC include "${WINAPK_JNI_INCLUDE}" "${WINAPK_JNI_INCLUDE}/win32")
   target_link_libraries(winapk_jni PUBLIC winapk_loader)
 

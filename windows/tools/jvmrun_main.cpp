@@ -1,86 +1,66 @@
 // jvmrun_main.cpp -- winapk-jvm-run, the real-JVM end-to-end test.
 //
 // Creates a real HotSpot JVM in-process, loads the Android x86_64 test library
-// (windows/test/guest/jni_guest.c) with the Win.apk ELF loader, binds its
-// native method to WinApkJniTest.nativeAdd through a host->guest native-method
-// thunk, and calls it from Java. The native implementation calls back into Java
-// (WinApkJniTest.javaMultiply) through the guest JNIEnv, so nativeAdd(3, 4)
-// returns (3 + 4) + (3 * 4) = 19 only if the whole stack works: loader,
-// native-method thunk, guest JNIEnv, the variadic Call bridge, and env
-// translation in both directions.
+// (windows/test/guest/jni_guest.c) with the Win.apk guest linker, and calls its
+// natives from Java through both ways a guest native gets bound:
+//
+//   * nativeMix is registered by the library's own JNI_OnLoad, through the
+//     guest RegisterNatives slot, which wraps it in a thunk.
+//   * nativeAdd is handed to HotSpot as a raw guest address, and the JVMTI
+//     NativeMethodBind hook has to replace it with a thunk. This stands in for
+//     HotSpot binding a Java_* symbol by name, which goes through the same
+//     event (the per-library stub DLL that makes HotSpot find the name is not
+//     built yet).
+//
+// nativeAdd calls back into Java (WinApkJniTest.javaMultiply) through the
+// guest JNIEnv, so nativeAdd(3, 4) returns (3 + 4) + (3 * 4) = 19 only if the
+// whole stack works: linker, native-method thunk, guest JNIEnv, the variadic
+// Call bridge, and env translation in both directions.
 //
 //   winapk-jvm-run <jni_guest.so> <classpath-dir>
 //
 // jvm.dll is found on PATH (CI adds the JDK; locally WINEPATH does).
 
-#include "winapk/abi_thunk.h"
-#include "winapk/elf_loader.h"
+#include "winapk/guest_abi.h"
 #include "winapk/guest_jni.h"
+#include "winapk/jni_bind.h"
+#include "winapk/linker.h"
+#include "winapk/mini_bionic.h"
 
+#include <cmath>
 #include <cstdio>
-#include <cstring>
 #include <string>
-#include <vector>
 
 #include <jni.h>
 #include <jvmti.h>
 #include <windows.h>
 
-#include "winapk/mini_bionic.h"
-
 namespace {
 
-jvmtiEnv* g_jvmti = nullptr;
-
-// SignatureProvider: JVMTI knows a method's signature from its jmethodID.
-const char* signature_of(void*, jmethodID mid) {
-    if (!g_jvmti || !mid) return nullptr;
-    char* name = nullptr;
-    char* sig = nullptr;
-    if (g_jvmti->GetMethodName(mid, &name, &sig, nullptr) != JVMTI_ERROR_NONE) return nullptr;
-    // Leak name/sig for simplicity: the test calls a bounded number of methods.
-    if (name) g_jvmti->Deallocate(reinterpret_cast<unsigned char*>(name));
-    return sig;  // caller reads it synchronously, before the next lookup
-}
-
-// Builds the native-method thunk argument kinds for a JNI signature: the two
-// leading pointers (JNIEnv*, jclass/jobject) then one per Java parameter.
-std::vector<winapk::ArgKind> arg_kinds(const char* sig) {
-    std::vector<winapk::ArgKind> k{winapk::ArgKind::Word, winapk::ArgKind::Word};
-    if (!sig || sig[0] != '(') return k;
-    const char* p = sig + 1;
-    while (*p && *p != ')') {
-        char c = *p++;
-        bool is_array = false;
-        while (c == '[') { is_array = true; c = *p++; }
-        if (is_array || c == 'L') {
-            if (c == 'L') { while (*p && *p != ';') ++p; if (*p == ';') ++p; }
-            k.push_back(winapk::ArgKind::Word);
-        } else {
-            switch (c) {
-                case 'Z': k.push_back(winapk::ArgKind::Bool); break;
-                case 'B': k.push_back(winapk::ArgKind::Byte); break;
-                case 'C': k.push_back(winapk::ArgKind::Char); break;
-                case 'S': k.push_back(winapk::ArgKind::Short); break;
-                case 'F': k.push_back(winapk::ArgKind::Float); break;
-                case 'D': k.push_back(winapk::ArgKind::Double); break;
-                case 'I': case 'J': default: k.push_back(winapk::ArgKind::Word); break;
-            }
-        }
-    }
-    return k;
-}
+int g_failures = 0;
 
 int fail(const char* msg) {
     std::fprintf(stderr, "FAIL: %s\n", msg);
     return 1;
 }
 
+void check(const char* what, bool ok, const std::string& detail) {
+    std::printf("  [%s] %s: %s\n", ok ? "PASS" : "FAIL", what, detail.c_str());
+    if (!ok) ++g_failures;
+}
+
+bool is_guest_code(const void* addr) {
+    winapk::GuestLinker* linker = winapk::GuestLinker::process();
+    return linker && linker->image_containing(addr);
+}
+
+using GuestOnLoad = jint(WINAPK_GUEST_ABI*)(JavaVM*, void*);
+
 }  // namespace
 
 int main(int argc, char** argv) {
     if (argc < 3) return fail("usage: winapk-jvm-run <guest.so> <classpath-dir>");
-    const char* so_path = argv[1];
+    const std::filesystem::path so_path = std::filesystem::u8path(argv[1]);
     const std::string cp = std::string("-Djava.class.path=") + argv[2];
 
     HMODULE jvm = LoadLibraryW(L"jvm.dll");
@@ -102,42 +82,60 @@ int main(int argc, char** argv) {
     JNIEnv* env = nullptr;
     if (create(&vm, reinterpret_cast<void**>(&env), &vm_args) != JNI_OK)
         return fail("JNI_CreateJavaVM");
-    if (vm->GetEnv(reinterpret_cast<void**>(&g_jvmti), JVMTI_VERSION_1_2) != JNI_OK)
+    jvmtiEnv* jvmti = nullptr;
+    if (vm->GetEnv(reinterpret_cast<void**>(&jvmti), JVMTI_VERSION_1_2) != JNI_OK)
         return fail("GetEnv(JVMTI)");
 
-    // Wire up the Win.apk guest JNI view backed by this real VM.
-    winapk::guest_jni_set_signature_provider(signature_of, nullptr);
-    winapk::guest_jni_init(vm);
+    // Upstream's order: the guest JNI view and the bind hook exist before the
+    // first guest library is loaded.
+    winapk::guest_jni_set_signature_provider(winapk::jvmti_method_signature, jvmti);
+    JavaVM* guest_vm = winapk::guest_jni_init(vm);
+    if (winapk::install_native_method_bind(vm, is_guest_code) != JNI_OK)
+        return fail("install_native_method_bind");
 
-    // Load the Android x86_64 library.
+    winapk::LinkerConfig config;
+    config.search_paths.push_back(so_path.parent_path());
+    config.host = winapk::mini_bionic_resolve;
+    winapk::GuestLinker linker(config);
     std::string err;
-    auto img = winapk::ElfImage::load(so_path, winapk::mini_bionic_resolve, &err);
-    if (!img) return fail(("load guest .so: " + err).c_str());
-    void* native = img->dlsym("Java_WinApkJniTest_nativeAdd");
-    if (!native) return fail("guest does not export Java_WinApkJniTest_nativeAdd");
+    void* lib = linker.open(so_path.u8string(), winapk::GuestLinker::kRtldNow, &err);
+    if (!lib) return fail(("load guest .so: " + err).c_str());
 
     jclass klass = env->FindClass("WinApkJniTest");
     if (!klass) return fail("FindClass WinApkJniTest (classpath?)");
 
-    // Bind the native through a host->guest thunk built from its signature.
-    const char* sig = "(II)I";
-    std::vector<winapk::ArgKind> kinds = arg_kinds(sig);
-    void* thunk = winapk::make_jni_native_thunk(native, kinds.data(), kinds.size(),
-                                                reinterpret_cast<void*>(&winapk::guest_env_wrapping));
-    if (!thunk) return fail("make_jni_native_thunk");
-    JNINativeMethod m{const_cast<char*>("nativeAdd"), const_cast<char*>(sig), thunk};
+    std::printf("Win.apk real-JVM end-to-end\n");
+
+    // What System.loadLibrary does after loading: call JNI_OnLoad with the
+    // (guest) JavaVM.
+    auto on_load = reinterpret_cast<GuestOnLoad>(linker.lookup(lib, "JNI_OnLoad", nullptr, &err));
+    if (!on_load) return fail("guest does not export JNI_OnLoad");
+    const jint version = on_load(guest_vm, nullptr);
+    if (env->ExceptionCheck()) { env->ExceptionDescribe(); return fail("exception in JNI_OnLoad"); }
+    check("JNI_OnLoad registers natives through the guest RegisterNatives", version == JNI_VERSION_1_6,
+          "returned " + std::to_string(version) + ", want " + std::to_string(JNI_VERSION_1_6));
+
+    void* native = linker.lookup(lib, "Java_WinApkJniTest_nativeAdd", nullptr, &err);
+    if (!native) return fail("guest does not export Java_WinApkJniTest_nativeAdd");
+    JNINativeMethod m{const_cast<char*>("nativeAdd"), const_cast<char*>("(II)I"), native};
     if (env->RegisterNatives(klass, &m, 1) != JNI_OK) return fail("RegisterNatives");
 
-    jmethodID add = env->GetStaticMethodID(klass, "nativeAdd", sig);
-    if (!add) return fail("GetStaticMethodID nativeAdd");
-    jint r = env->CallStaticIntMethod(klass, add, 3, 4);
+    jmethodID add = env->GetStaticMethodID(klass, "nativeAdd", "(II)I");
+    jmethodID mix = env->GetStaticMethodID(klass, "nativeMix", "(IDJF)D");
+    if (!add || !mix) return fail("GetStaticMethodID");
+
+    const jint sum = env->CallStaticIntMethod(klass, add, 3, 4);
     if (env->ExceptionCheck()) { env->ExceptionDescribe(); return fail("exception in nativeAdd"); }
+    check("nativeAdd(3, 4), bound through NativeMethodBind", sum == 19,
+          std::to_string(sum) + " (expect 19 = (3+4) + 3*4)");
 
-    std::printf("Win.apk real-JVM end-to-end\n");
-    std::printf("  nativeAdd(3, 4) = %d (expect 19 = (3+4) + 3*4)\n", r);
-    int failures = (r == 19) ? 0 : 1;
-    std::printf("\n%s: %d failure(s)\n", failures ? "FAILED" : "OK", failures);
+    const jdouble mixed = env->CallStaticDoubleMethod(klass, mix, 1, 0.5, jlong{1} << 40, 0.25f);
+    if (env->ExceptionCheck()) { env->ExceptionDescribe(); return fail("exception in nativeMix"); }
+    const double want = 1 + 0.5 + 1099511627776.0 + 0.25;
+    check("nativeMix(1, 0.5, 2^40, 0.25f), registered by the guest", std::fabs(mixed - want) < 1e-6,
+          std::to_string(mixed));
 
+    std::printf("\n%s: %d failure(s)\n", g_failures ? "FAILED" : "OK", g_failures);
     vm->DestroyJavaVM();
-    return failures;
+    return g_failures;
 }

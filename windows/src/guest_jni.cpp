@@ -4,11 +4,11 @@
 //
 //   * non-variadic (WINAPK_JNI_PLAIN): forwarded by a single template whose
 //     signature is deduced from the JNINativeInterface_ field itself, so every
-//     one of them is generated, not hand-written.
+//     one of them is generated, not hand-written. RegisterNatives is the one
+//     exception: it wraps the guest's function pointers first (jni_bind.h).
 //   * the Call<T>Method(env, obj, mid, ...) families (WINAPK_JNI_CALL) and
-//     their va_list variants (WINAPK_JNI_CALLV): deferred, installed as a
-//     loud-abort stub. They need the method signature to repack arguments and
-//     will be built on abi_thunk.cpp's variadic entry in the next slice.
+//     their va_list variants (WINAPK_JNI_CALLV): bridged by jni_variadic.cpp
+//     once a signature provider is set, a loud-abort stub until then.
 //   * reserved: left null, as HotSpot leaves them.
 //
 // The guest table is shared by every thread (the forwarders are stateless).
@@ -18,6 +18,7 @@
 #include "winapk/guest_jni.h"
 
 #include "winapk/guest_abi.h"
+#include "winapk/jni_bind.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -100,6 +101,10 @@ void build_guest_table() {
 #undef WINAPK_JNI_PLAIN
 #undef WINAPK_JNI_CALL
 #undef WINAPK_JNI_CALLV
+
+    // The one plain slot that cannot just forward: the function pointers the
+    // guest registers are System V and need a thunk each (jni_bind.h).
+    *reinterpret_cast<void**>(&t.RegisterNatives) = reinterpret_cast<void*>(&guest_register_natives);
 }
 
 // Updates this thread's guest env to wrap `host` and returns it as a JNIEnv*.

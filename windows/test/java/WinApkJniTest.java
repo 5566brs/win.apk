@@ -9,6 +9,9 @@ public class WinApkJniTest {
     // Implemented in libwinapk_jni_guest.so (Java_WinApkJniTest_nativeAdd).
     public static native int nativeAdd(int a, int b);
 
+    // Registered by the library's JNI_OnLoad through RegisterNatives.
+    public static native double nativeMix(int a, double x, long b, float y);
+
     // Called back from the native method through the guest JNIEnv.
     public static int javaMultiply(int a, int b) {
         return a * b;
