@@ -17,7 +17,7 @@ namespace {
 
 constexpr UINT kMsgShow = WM_APP + 1;
 constexpr UINT kMsgResize = WM_APP + 2;
-constexpr UINT kMsgShowState = WM_APP + 3;  // wParam: SW_MINIMIZE or SW_RESTORE
+constexpr UINT kMsgShowState = WM_APP + 3;  // wParam: SW_MINIMIZE, SW_RESTORE or SW_HIDE
 constexpr wchar_t kClassName[] = L"WinApkAppWindow";
 
 // android.view.KeyEvent META_* bits.
@@ -33,6 +33,36 @@ bool g_pointer_down = false;
 std::mutex g_frame_lock;
 std::vector<uint32_t> g_frame;
 int g_frame_w = 0, g_frame_h = 0;
+std::vector<uint32_t> g_overlay;  // empty: none
+int g_overlay_w = 0, g_overlay_h = 0;
+std::vector<uint32_t> g_composed;
+
+// The frame with the overlay blended over it ("source over", straight alpha),
+// the overlay scaled to the frame by nearest sampling.
+const uint32_t* composed_frame() {
+    if (g_overlay.empty()) return g_frame.data();
+    g_composed = g_frame;
+    for (int y = 0; y < g_frame_h; ++y) {
+        const int oy = y * g_overlay_h / g_frame_h;
+        for (int x = 0; x < g_frame_w; ++x) {
+            const uint32_t o = g_overlay[static_cast<size_t>(oy) * g_overlay_w + x * g_overlay_w / g_frame_w];
+            const uint32_t a = o >> 24;
+            if (a == 0) continue;
+            uint32_t& d = g_composed[static_cast<size_t>(y) * g_frame_w + x];
+            if (a == 255) {
+                d = o;
+                continue;
+            }
+            uint32_t out = 0xff000000u;
+            for (int shift = 0; shift < 24; shift += 8) {
+                const uint32_t sc = (o >> shift) & 0xff, dc = (d >> shift) & 0xff;
+                out |= ((sc * a + dc * (255 - a)) / 255) << shift;
+            }
+            d = out;
+        }
+    }
+    return g_composed.data();
+}
 COLORREF g_background = RGB(255, 255, 255);  // until the first frame
 
 UINT window_dpi(HWND hwnd) {
@@ -71,7 +101,7 @@ void paint(HWND hwnd) {
             bi.bmiHeader.biCompression = BI_RGB;
             SetStretchBltMode(dc, HALFTONE);
             SetBrushOrgEx(dc, 0, 0, nullptr);
-            StretchDIBits(dc, 0, 0, client.right, client.bottom, 0, 0, g_frame_w, g_frame_h, g_frame.data(), &bi,
+            StretchDIBits(dc, 0, 0, client.right, client.bottom, 0, 0, g_frame_w, g_frame_h, composed_frame(), &bi,
                           DIB_RGB_COLORS, SRCCOPY);
         } else {
             HBRUSH brush = CreateSolidBrush(g_background);
@@ -393,6 +423,12 @@ void window_set_phone_size(int phone_w, int phone_h) {
     if (g_hwnd) PostMessageW(g_hwnd, kMsgResize, 0, 0);
 }
 
+void* window_handle() { return g_hwnd; }
+
+void window_hide() {
+    if (g_hwnd) PostMessageW(g_hwnd, kMsgShowState, SW_HIDE, 0);
+}
+
 void window_minimize() {
     if (g_hwnd) PostMessageW(g_hwnd, kMsgShowState, SW_MINIMIZE, 0);
 }
@@ -415,6 +451,34 @@ void window_present(const uint32_t* argb, int w, int h) {
         g_frame_h = h;
     }
     InvalidateRect(g_hwnd, nullptr, FALSE);
+}
+
+void window_set_overlay(const uint32_t* argb, int w, int h) {
+    if (!g_hwnd || w <= 0 || h <= 0) return;
+    {
+        std::lock_guard<std::mutex> hold(g_frame_lock);
+        g_overlay.assign(argb, argb + static_cast<size_t>(w) * static_cast<size_t>(h));
+        g_overlay_w = w;
+        g_overlay_h = h;
+    }
+    InvalidateRect(g_hwnd, nullptr, FALSE);
+}
+
+void window_clear_overlay() {
+    {
+        std::lock_guard<std::mutex> hold(g_frame_lock);
+        if (g_overlay.empty()) return;
+        g_overlay.clear();
+        g_composed.clear();
+    }
+    if (g_hwnd) InvalidateRect(g_hwnd, nullptr, FALSE);
+}
+
+void window_set_secure(bool secure) {
+    // WDA_EXCLUDEFROMCAPTURE (Windows 10 2004); older systems show it black.
+    if (g_hwnd && !SetWindowDisplayAffinity(g_hwnd, secure ? 0x11 : WDA_NONE) && secure) {
+        SetWindowDisplayAffinity(g_hwnd, WDA_MONITOR);
+    }
 }
 
 int android_key_code(unsigned vk, wchar_t ch) {

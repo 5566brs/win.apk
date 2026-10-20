@@ -71,6 +71,7 @@ struct dirent* readdir(DIR*);
 int closedir(DIR*);
 typedef struct FILE FILE;
 FILE* fopen(const char*, const char*);
+int fputs(const char*, FILE*);
 int fprintf(FILE*, const char*, ...);
 int fclose(FILE*);
 char* fgets(char*, int, FILE*);
@@ -247,6 +248,169 @@ static void test_locale_and_syscall(void) {
     check("an unknown syscall fails with ENOSYS", syscall(9999) == -1 && *__errno() == 38, 0);
 }
 
+// Pipes, eventfd, poll and epoll: the wake-up machinery of every event loop.
+int pipe(int[2]);
+int eventfd(unsigned, int);
+struct pollfd { int fd; short events, revents; };
+int poll(struct pollfd*, unsigned long, int);
+int epoll_create1(int);
+struct __attribute__((packed)) epoll_event { unsigned events; unsigned long data; };
+int epoll_ctl(int, int, int, struct epoll_event*);
+int epoll_wait(int, struct epoll_event*, int, int);
+int fcntl(int, int, ...);
+int usleep(unsigned);
+
+static int g_wake_fd;
+static void* waker(void* arg) {
+    (void)arg;
+    usleep(20000);
+    unsigned long one = 1;
+    write(g_wake_fd, &one, 8);
+    return 0;
+}
+
+static void test_event_fds(void) {
+    int p[2];
+    char b[16] = {0};
+    check("pipe write/read", pipe(p) == 0 && write(p[1], "ping", 4) == 4 && read(p[0], b, 16) == 4 && !strcmp(b, "ping"), b);
+    struct pollfd pf = {p[0], 1, 0};
+    check("poll: empty pipe times out", poll(&pf, 1, 10) == 0, 0);
+    write(p[1], "x", 1);
+    check("poll: pipe readable", poll(&pf, 1, 100) == 1 && (pf.revents & 1), 0);
+    read(p[0], b, 1);
+    fcntl(p[0], 4, 04000);  // F_SETFL O_NONBLOCK
+    check("non-blocking empty read is EAGAIN", read(p[0], b, 1) == -1 && *__errno() == 11, 0);
+    close(p[1]);
+    check("read after the writer closed is EOF", read(p[0], b, 1) == 0, 0);
+    close(p[0]);
+
+    const int efd = eventfd(0, 0);
+    const int ep = epoll_create1(0);
+    struct epoll_event ev = {1, 42};
+    check("epoll_ctl ADD an eventfd", efd >= 0 && ep >= 0 && epoll_ctl(ep, 1, efd, &ev) == 0, 0);
+    g_wake_fd = efd;
+    pthread_t t;
+    pthread_create(&t, 0, waker, 0);
+    struct epoll_event out[4];
+    const int n = epoll_wait(ep, out, 4, 2000);
+    check("epoll_wait wakes when another thread writes the eventfd", n == 1 && out[0].data == 42 && (out[0].events & 1), 0);
+    unsigned long v = 0;
+    check("eventfd read returns the count", read(efd, &v, 8) == 8 && v == 1, 0);
+    pthread_join(t, 0);
+    check("epoll_wait times out once drained", epoll_wait(ep, out, 4, 10) == 0, 0);
+    close(ep);
+    close(efd);
+}
+
+// Sockets on Winsock: a loopback TCP exchange, IPv6 addresses, name lookup.
+struct sockaddr_in { unsigned short family, port; unsigned addr; char zero[8]; };
+struct sockaddr_in6 { unsigned short family, port; unsigned flowinfo; unsigned char addr[16]; unsigned scope; };
+struct addrinfo { int flags, family, socktype, protocol; unsigned addrlen; char* canonname; void* addr; struct addrinfo* next; };
+int socket(int, int, int);
+int bind(int, const void*, unsigned);
+int listen(int, int);
+int accept(int, void*, unsigned*);
+int connect(int, const void*, unsigned);
+int getsockname(int, void*, unsigned*);
+int setsockopt(int, int, int, const void*, unsigned);
+int getsockopt(int, int, int, void*, unsigned*);
+long send(int, const void*, size_t, int);
+long recv(int, void*, size_t, int);
+int socketpair(int, int, int, int[2]);
+int getaddrinfo(const char*, const char*, const struct addrinfo*, struct addrinfo**);
+void freeaddrinfo(struct addrinfo*);
+int inet_pton(int, const char*, void*);
+const char* inet_ntop(int, const void*, char*, unsigned);
+
+static int g_listener;
+static void* echo_server(void* arg) {
+    (void)arg;
+    int c = accept(g_listener, 0, 0);
+    char b[32];
+    long n = recv(c, b, sizeof b, 0);
+    if (n > 0) send(c, b, (size_t)n, 0);
+    close(c);
+    return 0;
+}
+
+static void test_sockets(void) {
+    g_listener = socket(2, 1, 0);  // AF_INET, SOCK_STREAM
+    int one = 1;
+    struct sockaddr_in a = {2, 0, 0x0100007f, {0}};  // 127.0.0.1, any port
+    unsigned len = sizeof a;
+    check("socket/setsockopt(SO_REUSEADDR)/bind/listen",
+          g_listener >= 0 && setsockopt(g_listener, 1, 2, &one, 4) == 0 && bind(g_listener, &a, sizeof a) == 0 &&
+              listen(g_listener, 1) == 0 && getsockname(g_listener, &a, &len) == 0 && a.family == 2 && a.port != 0,
+          0);
+    pthread_t t;
+    pthread_create(&t, 0, echo_server, 0);
+    int c = socket(2, 1, 0);
+    char b[32] = {0};
+    check("connect + send + recv over loopback TCP",
+          connect(c, &a, sizeof a) == 0 && send(c, "echo", 4, 0) == 4 && recv(c, b, sizeof b, 0) == 4 && !strcmp(b, "echo"), b);
+    struct pollfd pf = {c, 1, 0};
+    check("poll on a socket: readable at EOF", poll(&pf, 1, 1000) == 1 && read(c, b, 1) == 0, 0);
+    int err = -1;
+    len = 4;
+    check("getsockopt(SO_ERROR) is 0", getsockopt(c, 1, 4, &err, &len) == 0 && err == 0, 0);
+    close(c);
+    pthread_join(t, 0);
+    close(g_listener);
+
+    int sv[2];
+    check("socketpair passes data both ways",
+          socketpair(1, 1, 0, sv) == 0 && write(sv[0], "a", 1) == 1 && read(sv[1], b, 1) == 1 && b[0] == 'a' &&
+              write(sv[1], "b", 1) == 1 && read(sv[0], b, 1) == 1 && b[0] == 'b', 0);
+    close(sv[0]);
+    close(sv[1]);
+
+    struct sockaddr_in6 a6;
+    char text[64];
+    check("inet_pton/inet_ntop with Linux's AF_INET6 (10)",
+          inet_pton(10, "::1", a6.addr) == 1 && inet_ntop(10, a6.addr, text, sizeof text) && !strcmp(text, "::1"), text);
+    struct addrinfo hints = {4, 2, 1, 0, 0, 0, 0, 0};  // AI_NUMERICHOST, AF_INET, SOCK_STREAM
+    struct addrinfo* res = 0;
+    int ok = getaddrinfo("127.0.0.1", "80", &hints, &res) == 0 && res && res->family == 2 && res->addrlen == 16 &&
+             ((struct sockaddr_in*)res->addr)->port == 0x5000;
+    check("getaddrinfo (numeric) in bionic's addrinfo layout", ok, 0);
+    if (res) freeaddrinfo(res);
+}
+
+// The NDK's ALooper: a callback on a pipe, and a wake from another thread.
+void* ALooper_prepare(int);
+int ALooper_addFd(void*, int, int, int, int (*)(int, int, void*), void*);
+int ALooper_pollOnce(int, int*, int*, void**);
+void ALooper_wake(void*);
+static int g_looper_hits;
+static int on_pipe(int fd, int events, void* data) {
+    char c;
+    read(fd, &c, 1);
+    g_looper_hits += (events & 1) && data == (void*)7;
+    return 1;
+}
+static void* g_looper;
+static void* looper_waker(void* arg) {
+    (void)arg;
+    usleep(20000);
+    ALooper_wake(g_looper);
+    return 0;
+}
+static void test_looper(void) {
+    int p[2];
+    pipe(p);
+    g_looper = ALooper_prepare(0);
+    check("ALooper_prepare + addFd", g_looper && ALooper_addFd(g_looper, p[0], -2, 1, on_pipe, (void*)7) == 1, 0);
+    write(p[1], "z", 1);
+    check("pollOnce runs the descriptor's callback", ALooper_pollOnce(100, 0, 0, 0) == -2 && g_looper_hits == 1, 0);
+    check("pollOnce times out when idle", ALooper_pollOnce(10, 0, 0, 0) == -3, 0);
+    pthread_t t;
+    pthread_create(&t, 0, looper_waker, 0);
+    check("ALooper_wake from another thread ends a blocking pollOnce", ALooper_pollOnce(2000, 0, 0, 0) == -1, 0);
+    pthread_join(t, 0);
+    close(p[0]);
+    close(p[1]);
+}
+
 static void test_threads(void) {
     pthread_key_create(&g_key, key_dtor);
     pthread_t t[4];
@@ -303,6 +467,21 @@ static void test_files(const char* dir) {
     unlink(path);
     rmdir(sub);
     check("unlink + rmdir", stat(sub, &st) != 0, 0);
+    // Android's absolute paths land under the android root (the runner sets
+    // it to `dir`), and /dev/null is the null device.
+    mkdir("/data", 0755);
+    f = fopen("/data/mapped.txt", "w");
+    if (f) { fputs("mapped\n", f); fclose(f); }
+    snprintf(path, sizeof path, "%s/data/mapped.txt", dir);
+    line[0] = 0;
+    f = fopen(path, "r");
+    if (f) { fgets(line, sizeof line, f); fclose(f); }
+    check_str("/data/... maps under the android root", line, "mapped\n");
+    unlink("/data/mapped.txt");
+    rmdir("/data");
+    const int nfd = open("/dev/null", 01);
+    check("/dev/null accepts writes", nfd >= 0 && write(nfd, "x", 1) == 1, 0);
+    if (nfd >= 0) close(nfd);
 }
 
 // ---- the rest -------------------------------------------------------------------------
@@ -343,6 +522,9 @@ EXPORT int bionic_test(const char* dir) {
     test_threads();
     test_tls();
     test_locale_and_syscall();
+    test_event_fds();
+    test_sockets();
+    test_looper();
     test_files(dir);
     test_misc();
     return failures;

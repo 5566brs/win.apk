@@ -37,6 +37,16 @@ HostMethods native_log_methods();    // native_log.cpp
 HostMethods native_cocoa_methods();  // native_cocoa.cpp (headless for now)
 HostMethods native_linker_methods(); // guest_libs.cpp
 HostMethods native_os_methods();     // native_os.cpp
+HostMethods native_image_methods();  // native_image.cpp
+HostMethods native_looper_methods(); // native_looper.cpp
+HostMethods native_audio_methods();  // native_audio.cpp
+HostMethods native_clipboard_methods(); // native_clipboard.cpp
+HostMethods native_wallpaper_methods(); // native_wallpaper.cpp
+HostMethods native_picker_methods();    // native_picker.cpp
+HostMethods native_gamepad_methods();   // native_gamepad.cpp
+HostMethods native_icu_methods();       // native_icu.cpp
+HostMethods native_audio_input_methods(); // native_audio_input.cpp
+HostMethods native_photos_methods();    // native_photos.cpp
 
 // The app's directory under the data directory, where Boot renders the
 // launcher icon (icon.png) that becomes the window's icon. native_cocoa.cpp.

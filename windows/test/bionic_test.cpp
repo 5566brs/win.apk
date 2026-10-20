@@ -36,6 +36,9 @@ int main(int argc, char** argv) {
         std::printf("FAIL: the guest has no bionic_test\n");
         return 1;
     }
+    // Guest "/x" paths resolve under the scratch directory, as under the
+    // android root in the runtime.
+    winapk::set_android_root(argv[2]);
     const int failures = test(argv[2]);
     std::fflush(stdout);
     std::printf("\n%s: %d failure(s)\n", failures ? "FAILED" : "OK", failures);

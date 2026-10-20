@@ -51,12 +51,23 @@ void JNICALL Log_boostCurrentThreadQos(JNIEnv*, jclass) {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
 }
 
+// Upstream's JNI-call tracer is a Mac debugging aid with no Windows
+// counterpart; the call is a no-op there too unless MACAPK_TRACE_JNI is set.
+void JNICALL Log_installJniTrace(JNIEnv*, jclass) {}
+
+// The pairip integrity-gate emulation (MACAPK_PAIRIP_GATE_EMU) is not ported;
+// false tells Boot the rebind did not happen, so the app's own VMRunner stays.
+jboolean JNICALL Log_registerPairipGate(JNIEnv*, jclass, jclass) { return JNI_FALSE; }
+
 const HostMethod kMethods[] = {
     WINAPK_HOST_NATIVE("com.macapk.loader.NativeLog", "print", "(ILjava/lang/String;Ljava/lang/String;)V",
                        Log_print),
     WINAPK_HOST_NATIVE("com.macapk.loader.NativeLog", "nativeBootTimeNanos", "()J", Log_bootTimeNanos),
     WINAPK_HOST_NATIVE("com.macapk.loader.NativeLog", "nativeBoostCurrentThreadQos", "()V",
                        Log_boostCurrentThreadQos),
+    WINAPK_HOST_NATIVE("com.macapk.loader.NativeLog", "nativeInstallJniTrace", "()V", Log_installJniTrace),
+    WINAPK_HOST_NATIVE("com.macapk.loader.NativeLog", "nativeRegisterPairipGate", "(Ljava/lang/Class;)Z",
+                       Log_registerPairipGate),
 };
 
 }  // namespace

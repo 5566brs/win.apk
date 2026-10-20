@@ -28,14 +28,6 @@ namespace winapk::bionic {
 
 namespace {
 
-std::wstring wide(const char* utf8) {
-    if (!utf8) return {};
-    const int n = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, nullptr, 0);
-    std::wstring w(static_cast<size_t>(n > 0 ? n - 1 : 0), L'\0');
-    if (n > 1) MultiByteToWideChar(CP_UTF8, 0, utf8, -1, &w[0], n);
-    return w;
-}
-
 std::string narrow(const wchar_t* w) {
     const int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
     std::string s(static_cast<size_t>(n > 0 ? n - 1 : 0), '\0');
@@ -84,7 +76,7 @@ int crt_open_flags(int f) {
 // open() is variadic (its mode is the third argument only with O_CREAT), but a
 // variadic int travels in the same register as a fixed one.
 WINAPK_GUEST_ABI int g_open(const char* path, int flags, unsigned mode) {
-    const std::wstring w = wide(path);
+    const std::wstring w = host_path(path);
     if (flags & kODirectory) {
         const DWORD a = GetFileAttributesW(w.c_str());
         if (a == INVALID_FILE_ATTRIBUTES) {
@@ -110,16 +102,27 @@ WINAPK_GUEST_ABI int g_open(const char* path, int flags, unsigned mode) {
 }
 WINAPK_GUEST_ABI int g_open_2(const char* path, int flags) { return g_open(path, flags, 0); }
 WINAPK_GUEST_ABI int g_creat(const char* path, unsigned mode) { return g_open(path, kOWrOnly | kOCreat | kOTrunc, mode); }
-WINAPK_GUEST_ABI int g_close(int fd) { return _close(fd) < 0 ? fail_crt() : 0; }
+// Pipes, eventfds, epoll and sockets are objects (fd.cpp); each descriptor
+// call checks for one first.
+WINAPK_GUEST_ABI int g_close(int fd) {
+    if (fd_close(fd)) return 0;
+    return _close(fd) < 0 ? fail_crt() : 0;
+}
 WINAPK_GUEST_ABI int64_t g_read(int fd, void* buf, size_t n) {
+    if (auto o = fd_object(fd)) return o->read(buf, n);
     const int r = _read(fd, buf, static_cast<unsigned>(n > 0x7fffffff ? 0x7fffffff : n));
     return r < 0 ? fail_crt() : r;
 }
 WINAPK_GUEST_ABI int64_t g_write(int fd, const void* buf, size_t n) {
+    if (auto o = fd_object(fd)) return o->write(buf, n);
     const int r = _write(fd, buf, static_cast<unsigned>(n > 0x7fffffff ? 0x7fffffff : n));
     return r < 0 ? fail_crt() : r;
 }
 WINAPK_GUEST_ABI int64_t g_lseek(int fd, int64_t off, int whence) {
+    if (fd_object(fd)) {
+        *guest_errno() = kESPIPE;
+        return -1;
+    }
     const int64_t r = _lseeki64(fd, off, whence);
     return r < 0 ? fail_crt() : r;
 }
@@ -163,10 +166,17 @@ WINAPK_GUEST_ABI int64_t g_write_chk(int fd, const void* buf, size_t n, size_t b
     return g_write(fd, buf, n);
 }
 WINAPK_GUEST_ABI int g_dup(int fd) {
+    const int o = fd_dup(fd, -1);
+    if (o != -2) return o;
     const int r = _dup(fd);
     return r < 0 ? fail_crt() : r;
 }
-WINAPK_GUEST_ABI int g_dup2(int fd, int to) { return _dup2(fd, to) < 0 ? fail_crt() : to; }
+WINAPK_GUEST_ABI int g_dup2(int fd, int to) {
+    const int o = fd_dup(fd, to);
+    if (o != -2) return o;
+    fd_close(to);  // a file replacing an object
+    return _dup2(fd, to) < 0 ? fail_crt() : to;
+}
 WINAPK_GUEST_ABI int g_dup3(int fd, int to, int) { return g_dup2(fd, to); }
 WINAPK_GUEST_ABI int g_fsync(int fd) { return _commit(fd) < 0 ? fail_crt() : 0; }
 WINAPK_GUEST_ABI int g_ftruncate(int fd, int64_t len) {
@@ -177,10 +187,18 @@ WINAPK_GUEST_ABI int g_ftruncate(int fd, int64_t len) {
     }
     return 0;
 }
-WINAPK_GUEST_ABI int g_isatty(int fd) { return _isatty(fd) ? 1 : 0; }
+WINAPK_GUEST_ABI int g_isatty(int fd) { return !fd_object(fd) && _isatty(fd) ? 1 : 0; }
 // fcntl: descriptor flags are accepted and ignored (no fork, so close-on-exec
 // has nothing to protect); F_GETFL answers read-write.
 WINAPK_GUEST_ABI int g_fcntl(int fd, int cmd, int64_t arg) {
+    if (auto o = fd_object(fd)) {
+        // O_NONBLOCK is the status flag that matters for objects.
+        if (cmd == 3) return kORdWr | (o->nonblocking ? 04000 : 0);  // F_GETFL
+        if (cmd == 4) {                                              // F_SETFL
+            o->set_nonblocking((arg & 04000) != 0);
+            return 0;
+        }
+    }
     switch (cmd) {
         case 0: return g_dup(fd);                      // F_DUPFD
         case 1030: return g_dup(fd);                   // F_DUPFD_CLOEXEC
@@ -190,7 +208,14 @@ WINAPK_GUEST_ABI int g_fcntl(int fd, int cmd, int64_t arg) {
         default: (void)arg; *guest_errno() = kEINVAL; return -1;
     }
 }
-WINAPK_GUEST_ABI int g_ioctl(int, int, void*) {
+WINAPK_GUEST_ABI int g_ioctl(int fd, int request, void* arg) {
+    if (auto o = fd_object(fd)) {
+        if (request == 0x5421) {  // FIONBIO
+            o->set_nonblocking(*static_cast<int*>(arg) != 0);
+            return 0;
+        }
+        return o->ioctl(request, arg);
+    }
     *guest_errno() = 25;  // ENOTTY
     return -1;
 }
@@ -224,16 +249,107 @@ void fill_stat(const struct _stat64& s, GuestStat* g) {
 }
 WINAPK_GUEST_ABI int g_stat(const char* path, GuestStat* g) {
     struct _stat64 s;
-    if (_wstat64(wide(path).c_str(), &s) < 0) return fail_crt();
+    if (_wstat64(host_path(path).c_str(), &s) < 0) return fail_crt();
     fill_stat(s, g);
     return 0;
 }
 WINAPK_GUEST_ABI int g_fstat(int fd, GuestStat* g) {
+    if (auto o = fd_object(fd)) {
+        std::memset(g, 0, sizeof(*g));
+        g->st_mode = o->mode() | 0600;
+        g->st_nlink = 1;
+        g->st_blksize = 4096;
+        return 0;
+    }
     struct _stat64 s;
     if (_fstat64(fd, &s) < 0) return fail_crt();
     fill_stat(s, g);
     return 0;
 }
+// memfd_create: an anonymous file. A temporary file deleted on close behaves
+// the same for its uses (ftruncate, read/write, mmap of a private copy).
+WINAPK_GUEST_ABI int g_memfd_create(const char*, unsigned) {
+    wchar_t dir[MAX_PATH], path[MAX_PATH];
+    if (!GetTempPathW(MAX_PATH, dir) || !GetTempFileNameW(dir, L"mfd", 0, path)) {
+        set_errno_from_win32(GetLastError());
+        return -1;
+    }
+    HANDLE h = CreateFileW(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        set_errno_from_win32(GetLastError());
+        return -1;
+    }
+    const int fd = _open_osfhandle(reinterpret_cast<intptr_t>(h), _O_RDWR | _O_BINARY);
+    if (fd < 0) {
+        CloseHandle(h);
+        return fail_crt();
+    }
+    return fd;
+}
+
+// flock: LOCK_SH 1, LOCK_EX 2, LOCK_NB 4, LOCK_UN 8, on the whole file.
+WINAPK_GUEST_ABI int g_flock(int fd, int op) {
+    const HANDLE h = reinterpret_cast<HANDLE>(_get_osfhandle(fd));
+    if (h == INVALID_HANDLE_VALUE) {
+        *guest_errno() = kEBADF;
+        return -1;
+    }
+    OVERLAPPED at{};
+    if (op & 8) {
+        UnlockFileEx(h, 0, MAXDWORD, MAXDWORD, &at);
+        return 0;
+    }
+    DWORD flags = (op & 2) ? LOCKFILE_EXCLUSIVE_LOCK : 0;
+    if (op & 4) flags |= LOCKFILE_FAIL_IMMEDIATELY;
+    if (LockFileEx(h, flags, 0, MAXDWORD, MAXDWORD, &at)) return 0;
+    const DWORD e = GetLastError();
+    if (e == ERROR_LOCK_VIOLATION || e == ERROR_IO_PENDING) {
+        *guest_errno() = kEAGAIN;  // EWOULDBLOCK
+        return -1;
+    }
+    set_errno_from_win32(e);
+    return -1;
+}
+
+// Bionic's struct statvfs (x86_64): eleven unsigned longs, then spare ints.
+struct GuestStatvfs {
+    uint64_t f_bsize, f_frsize, f_blocks, f_bfree, f_bavail, f_files, f_ffree, f_favail, f_fsid, f_flag, f_namemax;
+    uint32_t spare[6];
+};
+static_assert(sizeof(GuestStatvfs) == 112, "Bionic's struct statvfs on x86_64");
+int statvfs_of(const std::wstring& path, GuestStatvfs* out) {
+    ULARGE_INTEGER avail, total, free_bytes;
+    if (!GetDiskFreeSpaceExW(path.c_str(), &avail, &total, &free_bytes)) {
+        set_errno_from_win32(GetLastError());
+        return -1;
+    }
+    std::memset(out, 0, sizeof(*out));
+    out->f_bsize = out->f_frsize = 4096;
+    out->f_blocks = total.QuadPart / 4096;
+    out->f_bfree = free_bytes.QuadPart / 4096;
+    out->f_bavail = avail.QuadPart / 4096;
+    out->f_files = out->f_ffree = out->f_favail = 1u << 20;  // NTFS has no inode limit to report
+    out->f_namemax = 255;
+    return 0;
+}
+WINAPK_GUEST_ABI int g_statvfs(const char* path, GuestStatvfs* out) { return statvfs_of(host_path(path), out); }
+WINAPK_GUEST_ABI int g_fstatvfs(int fd, GuestStatvfs* out) {
+    const HANDLE h = reinterpret_cast<HANDLE>(_get_osfhandle(fd));
+    wchar_t path[MAX_PATH + 8];
+    if (h == INVALID_HANDLE_VALUE || !GetFinalPathNameByHandleW(h, path, MAX_PATH, FILE_NAME_NORMALIZED)) {
+        *guest_errno() = kEBADF;
+        return -1;
+    }
+    // \\?\C:\dir\file -> its volume root.
+    wchar_t root[MAX_PATH];
+    if (!GetVolumePathNameW(path, root, MAX_PATH)) {
+        set_errno_from_win32(GetLastError());
+        return -1;
+    }
+    return statvfs_of(root, out);
+}
+
 // AT_FDCWD (-100) with a path, the common case of the *at() calls.
 WINAPK_GUEST_ABI int g_fstatat(int dirfd, const char* path, GuestStat* g, int) {
     if (dirfd != -100 && path && path[0] != '/' && !(path[0] && path[1] == ':')) {
@@ -244,33 +360,33 @@ WINAPK_GUEST_ABI int g_fstatat(int dirfd, const char* path, GuestStat* g, int) {
 }
 WINAPK_GUEST_ABI int g_access(const char* path, int mode) {
     // _waccess knows no X_OK (1); anything readable counts.
-    return _waccess(wide(path).c_str(), mode & 6) < 0 ? fail_crt() : 0;
+    return _waccess(host_path(path).c_str(), mode & 6) < 0 ? fail_crt() : 0;
 }
 WINAPK_GUEST_ABI int g_faccessat(int, const char* path, int mode, int) { return g_access(path, mode); }
 
 // ---- the file system -------------------------------------------------------------------
-WINAPK_GUEST_ABI int g_mkdir(const char* path, unsigned) { return _wmkdir(wide(path).c_str()) < 0 ? fail_crt() : 0; }
-WINAPK_GUEST_ABI int g_rmdir(const char* path) { return _wrmdir(wide(path).c_str()) < 0 ? fail_crt() : 0; }
+WINAPK_GUEST_ABI int g_mkdir(const char* path, unsigned) { return _wmkdir(host_path(path).c_str()) < 0 ? fail_crt() : 0; }
+WINAPK_GUEST_ABI int g_rmdir(const char* path) { return _wrmdir(host_path(path).c_str()) < 0 ? fail_crt() : 0; }
 WINAPK_GUEST_ABI int g_unlink(const char* path) {
     // POSIX unlinks an open file; Windows needs it shared for delete, which
     // the CRT does not ask for, so fall back to delete-on-close semantics.
-    const std::wstring w = wide(path);
+    const std::wstring w = host_path(path);
     if (DeleteFileW(w.c_str())) return 0;
     set_errno_from_win32(GetLastError());
     return -1;
 }
 WINAPK_GUEST_ABI int g_rename(const char* from, const char* to) {
-    if (MoveFileExW(wide(from).c_str(), wide(to).c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) return 0;
+    if (MoveFileExW(host_path(from).c_str(), host_path(to).c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) return 0;
     set_errno_from_win32(GetLastError());
     return -1;
 }
 WINAPK_GUEST_ABI int g_remove(const char* path) {
-    const std::wstring w = wide(path);
+    const std::wstring w = host_path(path);
     const DWORD a = GetFileAttributesW(w.c_str());
     if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY)) return g_rmdir(path);
     return g_unlink(path);
 }
-WINAPK_GUEST_ABI int g_chdir(const char* path) { return _wchdir(wide(path).c_str()) < 0 ? fail_crt() : 0; }
+WINAPK_GUEST_ABI int g_chdir(const char* path) { return _wchdir(host_path(path).c_str()) < 0 ? fail_crt() : 0; }
 WINAPK_GUEST_ABI char* g_getcwd(char* buf, size_t n) {
     wchar_t w[MAX_PATH * 4];
     if (!_wgetcwd(w, MAX_PATH * 4)) {
@@ -288,7 +404,7 @@ WINAPK_GUEST_ABI char* g_getcwd(char* buf, size_t n) {
 }
 WINAPK_GUEST_ABI char* g_realpath(const char* path, char* out) {
     wchar_t full[MAX_PATH * 4];
-    if (!GetFullPathNameW(wide(path).c_str(), MAX_PATH * 4, full, nullptr)) {
+    if (!GetFullPathNameW(host_path(path).c_str(), MAX_PATH * 4, full, nullptr)) {
         set_errno_from_win32(GetLastError());
         return nullptr;
     }
@@ -325,7 +441,7 @@ struct GuestDir {
 };
 
 WINAPK_GUEST_ABI GuestDir* g_opendir(const char* path) {
-    std::wstring pattern = wide(path);
+    std::wstring pattern = host_path(path);
     if (!pattern.empty() && pattern.back() != L'/' && pattern.back() != L'\\') pattern += L'\\';
     pattern += L'*';
     auto* d = new GuestDir();
@@ -375,7 +491,7 @@ std::wstring crt_mode(const char* mode) {
 }
 
 WINAPK_GUEST_ABI FILE* g_fopen(const char* path, const char* mode) {
-    FILE* f = _wfopen(wide(path).c_str(), crt_mode(mode).c_str());
+    FILE* f = _wfopen(host_path(path).c_str(), crt_mode(mode).c_str());
     if (!f) set_errno_from_crt(errno);
     return f;
 }
@@ -387,7 +503,7 @@ WINAPK_GUEST_ABI FILE* g_fdopen(int fd, const char* mode) {
     return f;
 }
 WINAPK_GUEST_ABI FILE* g_freopen(const char* path, const char* mode, void* f) {
-    FILE* r = _wfreopen(wide(path).c_str(), crt_mode(mode).c_str(), host_file(f));
+    FILE* r = _wfreopen(host_path(path).c_str(), crt_mode(mode).c_str(), host_file(f));
     if (!r) set_errno_from_crt(errno);
     return r;
 }
@@ -483,6 +599,10 @@ const ShimSymbol kSymbols[] = {
     WINAPK_SHIM("fstat", g_fstat),
     WINAPK_SHIM("fstat64", g_fstat),
     WINAPK_SHIM("fstatat", g_fstatat),
+    WINAPK_SHIM("memfd_create", g_memfd_create),
+    WINAPK_SHIM("flock", g_flock),
+    WINAPK_SHIM("statvfs", g_statvfs),
+    WINAPK_SHIM("fstatvfs", g_fstatvfs),
     WINAPK_SHIM("fstatat64", g_fstatat),
     WINAPK_SHIM("access", g_access),
     WINAPK_SHIM("faccessat", g_faccessat),

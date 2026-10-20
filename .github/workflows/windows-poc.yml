@@ -86,6 +86,8 @@ jobs:
         run: |
           mkdir -p bionic-scratch
           ./build/winapk-bionic-test.exe guest/libwinapk_bionic_guest.so "$(cygpath -w "$PWD/bionic-scratch")"
+      - name: Run the audio backend test
+        run: ./build/winapk-audio-test.exe "$(cygpath -w "$PWD/windows/test/audio")"
       - name: Run the real-JVM end-to-end test
         run: |
           export PATH="$(cygpath -u "$JAVA_HOME")/bin/server:$(cygpath -u "$JAVA_HOME")/bin:$PATH"

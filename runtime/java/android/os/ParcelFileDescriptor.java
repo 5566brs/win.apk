@@ -246,13 +246,8 @@ public class ParcelFileDescriptor implements Parcelable, java.io.Closeable {
     // opened in jvm_loader.cpp), so this is the write side of an
     // already-working reflection path.
     public static ParcelFileDescriptor adoptFd(int fd) {
-        java.io.FileDescriptor fdesc = new java.io.FileDescriptor();
-        try {
-            java.lang.reflect.Field fld = java.io.FileDescriptor.class.getDeclaredField("fd");
-            fld.setAccessible(true);
-            fld.setInt(fdesc, fd);
-        } catch (Throwable ignored) {}
-        return new ParcelFileDescriptor(fdesc);
+        // Windows: the FileDescriptor needs a handle of its own for Java I/O.
+        return new ParcelFileDescriptor(com.macapk.loader.NativeOs.wrap(fd));
     }
 
     private static java.io.FileDescriptor channelFd(Object channel) {
@@ -586,15 +581,10 @@ public class ParcelFileDescriptor implements Parcelable, java.io.Closeable {
         @Override public ParcelFileDescriptor[] newArray(int size) { return new ParcelFileDescriptor[size]; }
     };
 
+    // Windows: a FileDescriptor holds a HANDLE; NativeOs gives native code a
+    // descriptor number for it.
     static int macapkFdInt(FileDescriptor f) {
-        if (f == null) return -1;
-        try {
-            java.lang.reflect.Field fld = FileDescriptor.class.getDeclaredField("fd");
-            fld.setAccessible(true);
-            return fld.getInt(f);
-        } catch (Throwable t) {
-            return -1;
-        }
+        return com.macapk.loader.NativeOs.fdOf(f);
     }
 
     // ParcelFileDescriptor.AutoCloseInputStream -- a FileInputStream that closes

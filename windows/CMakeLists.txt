@@ -33,12 +33,16 @@ add_library(winapk_loader STATIC
   src/bionic/stdio.cpp
   src/bionic/misc.cpp
   src/bionic/locale.cpp
+  src/bionic/paths.cpp
+  src/bionic/fd.cpp
+  src/bionic/socket.cpp
+  src/bionic/looper.cpp
   src/abi_thunk.cpp
   src/linker.cpp
 )
 target_include_directories(winapk_loader PUBLIC include PRIVATE src)
-# WaitOnAddress (the shim's futexes) and BCryptGenRandom (arc4random).
-target_link_libraries(winapk_loader PUBLIC synchronization bcrypt)
+# WaitOnAddress (the shim's futexes), BCryptGenRandom (arc4random), Winsock.
+target_link_libraries(winapk_loader PUBLIC synchronization bcrypt ws2_32)
 target_compile_definitions(winapk_loader PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX)
 if(NOT MSVC)
   target_compile_options(winapk_loader PRIVATE -Wall -Wextra)
@@ -104,12 +108,49 @@ if(WINAPK_JNI_INCLUDE)
     SQLITE_THREADSAFE=1 SQLITE_ENABLE_FTS3 SQLITE_ENABLE_FTS3_PARENTHESIS SQLITE_ENABLE_FTS4
     SQLITE_ENABLE_FTS5 SQLITE_ENABLE_RTREE SQLITE_ENABLE_COLUMN_METADATA)
 
+  # libwebp's decoder for NativeImageCodec: most APK drawables are WebP, which
+  # Java's ImageIO cannot read and not every Windows has a WIC codec for. The
+  # release tarball, checked against its SHA-256; only the decoder is built.
+  set(WINAPK_WEBP_VERSION 1.5.0)
+  set(WINAPK_WEBP_SHA256 7d6fab70cf844bf6769077bd5d7a74893f8ffd4dfb42861745750c63c2a5c92c)
+  set(WINAPK_WEBP_DIR ${CMAKE_BINARY_DIR}/libwebp-${WINAPK_WEBP_VERSION})
+  if(NOT EXISTS ${WINAPK_WEBP_DIR}/CMakeLists.txt)
+    set(_tgz ${CMAKE_BINARY_DIR}/libwebp-${WINAPK_WEBP_VERSION}.tar.gz)
+    file(DOWNLOAD https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-${WINAPK_WEBP_VERSION}.tar.gz
+         ${_tgz} EXPECTED_HASH SHA256=${WINAPK_WEBP_SHA256} TLS_VERIFY ON)
+    file(ARCHIVE_EXTRACT INPUT ${_tgz} DESTINATION ${CMAKE_BINARY_DIR})
+  endif()
+  foreach(_opt ANIM_UTILS CWEBP DWEBP GIF2WEBP IMG2WEBP VWEBP WEBPINFO LIBWEBPMUX WEBPMUX EXTRAS)
+    set(WEBP_BUILD_${_opt} OFF CACHE BOOL "" FORCE)
+  endforeach()
+  add_subdirectory(${WINAPK_WEBP_DIR} ${CMAKE_BINARY_DIR}/libwebp-build EXCLUDE_FROM_ALL)
+
+  # stb_vorbis (public domain) decodes the Ogg Vorbis clips games ship for
+  # SoundPool and MediaPlayer; Windows has no Vorbis codec. One file, pinned to
+  # a commit and checked against its SHA-256.
+  set(WINAPK_STB_COMMIT a7d4c2175630e1ea5b6f8dd00ab96fed0b97b96d)
+  set(WINAPK_STB_VORBIS ${CMAKE_BINARY_DIR}/stb_vorbis-${WINAPK_STB_COMMIT}.c)
+  if(NOT EXISTS ${WINAPK_STB_VORBIS})
+    file(DOWNLOAD https://raw.githubusercontent.com/nothings/stb/${WINAPK_STB_COMMIT}/stb_vorbis.c
+         ${WINAPK_STB_VORBIS}
+         EXPECTED_HASH SHA256=4c7cb2ff1f7011e9d67950446b7eb9ca044f2e464d76bfbb0b84dd2e23e65636 TLS_VERIFY ON)
+  endif()
+  add_library(winapk_stb_vorbis STATIC ${WINAPK_STB_VORBIS})
+  target_compile_options(winapk_stb_vorbis PRIVATE -w)
+
   # The host that runs an APK (milestone M1). Like winapk-jvm-run it loads
   # jvm.dll at runtime.
   add_executable(winapk-runtime host/runtime_main.cpp host/host_natives.cpp host/native_log.cpp
                               host/native_cocoa.cpp host/win32_window.cpp host/guest_libs.cpp
-                              host/native_os.cpp)
-  target_link_libraries(winapk-runtime PRIVATE winapk_jni winapk_sqlite windowscodecs ole32)
+                              host/native_os.cpp host/native_image.cpp
+                              host/native_looper.cpp host/native_audio.cpp host/audio_engine.cpp
+                              host/audio_decode.cpp host/native_clipboard.cpp
+                              host/native_wallpaper.cpp host/native_picker.cpp
+                              host/native_gamepad.cpp host/native_icu.cpp
+                              host/native_audio_input.cpp host/native_photos.cpp)
+  target_link_libraries(winapk-runtime PRIVATE winapk_jni winapk_sqlite webpdecoder winapk_stb_vorbis windowscodecs
+                        ole32 mfplat mfreadwrite mfuuid shlwapi advapi32 shell32 uuid)
+  target_include_directories(winapk-runtime PRIVATE ${WINAPK_WEBP_DIR}/src)
   target_compile_options(winapk-runtime PRIVATE -Wall -Wextra)
   # Upstream's NativeSqlite bridge, compiled unchanged: compat/ supplies the
   # few CoreFoundation string calls it makes. Upstream's warnings are not ours.
@@ -117,6 +158,11 @@ if(WINAPK_JNI_INCLUDE)
   target_include_directories(winapk-runtime PRIVATE compat)
   set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/../runtime/src/native_sqlite.cpp
                               PROPERTIES COMPILE_OPTIONS "-w")
+
+  # NativeAudio's backend on its own (test/audio_test.cpp).
+  add_executable(winapk-audio-test test/audio_test.cpp host/audio_engine.cpp host/audio_decode.cpp)
+  target_link_libraries(winapk-audio-test PRIVATE winapk_stb_vorbis ole32 mfplat mfreadwrite mfuuid shlwapi)
+  target_link_options(winapk-audio-test PRIVATE -static)
 
   # An app's native libraries (milestone M4, host/guest_libs.h): the stub DLL
   # that stands for each one and the translator that copies it. Built with the

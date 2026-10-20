@@ -22,6 +22,7 @@ namespace {
 const char* const kHostClasses[] = {
     "android.app.NativeActivity",
     "android.content.ClipboardManager",
+    "android.content.ClipboardManager$MacApkHostPasteboard",
     "android.opengl.EGL14",
     "android.opengl.EGL15",
     "android.opengl.EGLExt",
@@ -82,6 +83,16 @@ const HostMethods kProviders[] = {
     native_cocoa_methods(),
     native_linker_methods(),
     native_os_methods(),
+    native_image_methods(),
+    native_looper_methods(),
+    native_audio_methods(),
+    native_clipboard_methods(),
+    native_wallpaper_methods(),
+    native_picker_methods(),
+    native_gamepad_methods(),
+    native_icu_methods(),
+    native_audio_input_methods(),
+    native_photos_methods(),
 };
 
 const JNINativeMethod* implementation_of(const char* clazz, const char* name, const char* sig) {

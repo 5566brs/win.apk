@@ -31,6 +31,8 @@
 #include <jvmti.h>
 #include <windows.h>
 
+#include "winapk/mini_bionic.h"
+
 namespace macapk::sqlite {
 void RegisterNativeSqliteMethods(JNIEnv* env);  // runtime/src/native_sqlite.cpp
 }
@@ -257,6 +259,8 @@ std::vector<std::string> jvm_options(const BootArgs& b) {
     fs::create_directories(android_root, ec);
     fs::create_directories(logs, ec);
     v.push_back("-Dmacapk.android.root=" + jvm_path(android_root));
+    // Guest code's "/data/...", "/sdcard/..." resolve under the same folder.
+    winapk::set_android_root(utf8(android_root.wstring()).c_str());
     v.push_back("-Dmacapk.bundle.apk=" + jvm_path(o.apk));
     v.push_back("-XX:ErrorFile=" + jvm_path(logs) + "\\hs_err_pid%p.log");
     // Extra options, space-separated, as upstream reads them.

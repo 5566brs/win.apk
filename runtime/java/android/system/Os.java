@@ -136,14 +136,13 @@ public class Os {
         try { java.lang.reflect.Field f = java.io.FileDescriptor.class.getDeclaredField("fd");
               f.setAccessible(true); return f; } catch (Throwable t) { return null; }
     }
+    // On Windows the JDK's FileDescriptor holds a HANDLE; NativeOs bridges it
+    // to the descriptor numbers native code uses.
     private static int fdOf(java.io.FileDescriptor fd) {
-        if (fd == null || FD_FIELD == null) return -1;
-        try { return FD_FIELD.getInt(fd); } catch (Throwable t) { return -1; }
+        return com.macapk.loader.NativeOs.fdOf(fd);
     }
     private static java.io.FileDescriptor newFd(int fd) {
-        java.io.FileDescriptor f = new java.io.FileDescriptor();
-        try { if (FD_FIELD != null) FD_FIELD.setInt(f, fd); } catch (Throwable t) {}
-        return f;
+        return com.macapk.loader.NativeOs.wrap(fd);
     }
 
     /** AOSP libcore Os.open (libcore/luni/src/main/java/android/system/Os.java):
@@ -229,6 +228,8 @@ public class Os {
         int r = com.macapk.loader.NativeOs.close(raw);
         if (r < 0) throw new ErrnoException("close", -r);
         try { if (FD_FIELD != null) FD_FIELD.setInt(fd, -1); } catch (Throwable t) {}
+        // Windows: the FileDescriptor's own handle is the same open file.
+        com.macapk.loader.NativeOs.closeHandleOf(fd);
     }
     public static java.io.FileDescriptor dup(java.io.FileDescriptor fd) throws ErrnoException {
         int r = com.macapk.loader.NativeOs.dup(fdOf(fd));

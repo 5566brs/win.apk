@@ -38,7 +38,10 @@ void window_show();
 void window_set_title(const std::string& utf8);
 void window_set_phone_size(int phone_w, int phone_h);
 // The app moved its task to the back or front (Activity.moveTaskToBack).
+// The app window, for dialogs it owns (nullptr headless or before start).
+void* window_handle();
 void window_minimize();
+void window_hide();
 void window_restore();
 // The window and taskbar icon, from a PNG (the app's rendered launcher icon).
 // Returns false if the file cannot be read or decoded.
@@ -47,6 +50,12 @@ bool window_set_icon_png(const std::wstring& path);
 void window_set_background(uint32_t argb);
 // Copies the frame; it is painted on the UI thread.
 void window_present(const uint32_t* argb, int w, int h);
+// A layer drawn over the frame (dialogs over GL or surface content), scaled to
+// the frame, alpha-blended; cleared with window_clear_overlay.
+void window_set_overlay(const uint32_t* argb, int w, int h);
+void window_clear_overlay();
+// Keeps the window out of screenshots and screen sharing (FLAG_SECURE).
+void window_set_secure(bool secure);
 
 // Translates a Windows virtual key to an Android KEYCODE_* (0 if none), as
 // upstream's host_keymap.h does for macOS key codes.

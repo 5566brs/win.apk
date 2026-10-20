@@ -28,6 +28,7 @@
 #include <string>
 
 #include <windows.h>
+#include <shellapi.h>
 
 #include "win32_window.h"
 #include "winapk/mini_bionic.h"
@@ -174,6 +175,94 @@ void JNICALL Cocoa_applyRequestedOrientation(JNIEnv*, jclass, jboolean landscape
     window_set_phone_size(g_phone_w, g_phone_h);
 }
 
+// ActivityInfo.screenOrientation: the landscape and portrait families turn
+// the phone; the rest (unspecified, sensor, behind...) leave it as it is.
+void apply_screen_orientation(jint o) {
+    if (o == 0 || o == 6 || o == 8 || o == 11) Cocoa_applyRequestedOrientation(nullptr, nullptr, JNI_TRUE);
+    else if (o == 1 || o == 7 || o == 9 || o == 12) Cocoa_applyRequestedOrientation(nullptr, nullptr, JNI_FALSE);
+}
+void JNICALL Cocoa_applyWindowOrientation(JNIEnv*, jclass, jint o) { apply_screen_orientation(o); }
+void JNICALL Cocoa_applyWindowOrientationFor(JNIEnv*, jclass, jstring, jint, jint o, jint) {
+    apply_screen_orientation(o);
+}
+// The user rotation is the boot orientation, portrait (there is no Cmd+R
+// rotation here).
+void JNICALL Cocoa_restoreUserOrientation(JNIEnv*, jclass) {
+    Cocoa_applyRequestedOrientation(nullptr, nullptr, JNI_FALSE);
+}
+// No user aspect-ratio override exists here, so the record's own orientation stands.
+jint JNICALL Cocoa_windowOverrideOrientation(JNIEnv*, jclass, jstring, jint record) { return record; }
+// No per-activity window policy session: Java falls back to the display
+// commit (documented null).
+jintArray JNICALL Cocoa_activityWindowTransition(JNIEnv*, jclass, jstring, jint, jboolean, jboolean, jint, jint, jint,
+                                                 jint, jint) {
+    return nullptr;
+}
+
+// One window holds every activity, so these window-shaping calls have
+// nothing to act on.
+void JNICALL Cocoa_setTopActivityConfigChanges(JNIEnv*, jclass, jint) {}
+void JNICALL Cocoa_setMaxAspectRatio(JNIEnv*, jclass, jfloat) {}
+void JNICALL Cocoa_setContentView(JNIEnv*, jclass, jlong, jlong) {}
+void JNICALL Cocoa_closeWindow(JNIEnv*, jclass, jlong) {}
+
+// FLAG_SECURE: kept out of screenshots, recording and screen sharing.
+void JNICALL Cocoa_setSecureContent(JNIEnv*, jclass, jboolean secure) { window_set_secure(secure == JNI_TRUE); }
+
+// An implicit ACTION_VIEW/SENDTO/DIAL intent nobody in the app handles: the
+// system opens the URL (browser, mail, ...). Only URLs with a scheme, and not
+// file:, so an intent cannot start a program by its path.
+jboolean JNICALL Cocoa_openHostUrl(JNIEnv* env, jclass, jstring url) {
+    if (!url) return JNI_FALSE;
+    const jchar* c = env->GetStringChars(url, nullptr);
+    const std::wstring u(reinterpret_cast<const wchar_t*>(c), static_cast<size_t>(env->GetStringLength(url)));
+    env->ReleaseStringChars(url, c);
+    size_t colon = u.find(L':');
+    bool scheme = colon != std::wstring::npos && colon > 1 && iswalpha(u[0]);
+    for (size_t i = 1; scheme && i < colon; ++i) {
+        scheme = iswalnum(u[i]) || u[i] == L'+' || u[i] == L'-' || u[i] == L'.';
+    }
+    if (!scheme || _wcsnicmp(u.c_str(), L"file:", 5) == 0) return JNI_FALSE;
+    const auto r = reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", u.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
+    return r > 32 ? JNI_TRUE : JNI_FALSE;
+}
+
+// Custom URL schemes for the app (OAuth redirects) need the scheme registered
+// and a running instance to forward to; until then the intake answers
+// "unavailable", which HostUrlIntake treats as no host routing.
+jobjectArray JNICALL Cocoa_takeHostUrls(JNIEnv* env, jclass) {
+    return env->NewObjectArray(0, env->FindClass("java/lang/String"), nullptr);
+}
+jobjectArray JNICALL Cocoa_urlSchemeHandlers(JNIEnv*, jclass, jstring) { return nullptr; }
+jint JNICALL Cocoa_setUrlSchemeDefault(JNIEnv*, jclass, jstring, jstring) { return -1; }
+
+// The GL overlay layer: dialogs and toasts over content the view tree does
+// not draw (GL, surfaces).
+void JNICALL Cocoa_presentOverlayBitmap(JNIEnv* env, jclass, jintArray argb, jint w, jint h) {
+    if (!argb || w <= 0 || h <= 0 || env->GetArrayLength(argb) < w * h) return;
+    jint* px = env->GetIntArrayElements(argb, nullptr);
+    if (!px) return;
+    window_set_overlay(reinterpret_cast<const uint32_t*>(px), w, h);
+    env->ReleaseIntArrayElements(argb, px, JNI_ABORT);
+}
+void JNICALL Cocoa_clearOverlayBitmap(JNIEnv*, jclass) { window_clear_overlay(); }
+
+// Quitting: the window goes away at once, before the app's teardown runs.
+jboolean JNICALL Cocoa_hostHideWindowsForQuit(JNIEnv*, jclass) {
+    window_hide();
+    return window_running() ? JNI_TRUE : JNI_FALSE;
+}
+
+// Upstream shows "Translating <lib>..." while it translates ARM code; x86_64
+// libraries load without translation, so there is nothing to show.
+void JNICALL Cocoa_showTranslationOverlay(JNIEnv*, jclass, jstring) {}
+void JNICALL Cocoa_updateTranslationOverlay(JNIEnv*, jclass, jstring) {}
+void JNICALL Cocoa_hideTranslationOverlay(JNIEnv*, jclass) {}
+
+// No GL render thread or GLSurfaceView yet (M6): nothing to tick or withhold.
+jboolean JNICALL Cocoa_beginWithheldTick(JNIEnv*, jclass, jboolean) { return JNI_FALSE; }
+jboolean JNICALL Cocoa_hostRenderTick(JNIEnv*, jclass) { return JNI_FALSE; }
+
 void JNICALL Cocoa_showWindow(JNIEnv*, jclass, jlong) {
     apply_app_icon();
     window_show();
@@ -194,6 +283,21 @@ void JNICALL Cocoa_setSystemProperty(JNIEnv* env, jclass, jstring key, jstring v
     if (v) env->ReleaseStringUTFChars(value, v);
     if (k) env->ReleaseStringUTFChars(key, k);
 }
+
+// Boot writes Android's fonts (and a fonts.xml) to a cache directory; native
+// text stacks (Skia in Flutter apps) read them as /system/fonts.
+void JNICALL Cocoa_setSystemFontsDir(JNIEnv* env, jclass, jstring dir) {
+    if (!dir) return;
+    const char* d = env->GetStringUTFChars(dir, nullptr);
+    if (d) {
+        winapk::set_system_fonts_dir(d);
+        env->ReleaseStringUTFChars(dir, d);
+    }
+}
+// Upstream uses these for its /proc/self/maps and relative-path emulation,
+// which the Windows shim does not have; accepting them keeps boot quiet.
+void JNICALL Cocoa_setNativeLibDir(JNIEnv*, jclass, jstring) {}
+void JNICALL Cocoa_setDataSubdir(JNIEnv*, jclass, jstring) {}
 
 void JNICALL Cocoa_setWindowTitle(JNIEnv* env, jclass, jlong, jstring title) {
     if (!title) return;
@@ -410,6 +514,32 @@ const HostMethod kMethods[] = {
     WINAPK_HOST_NATIVE(kCls, "setStartingWindowColor", "(I)V", Cocoa_setStartingWindowColor),
     WINAPK_HOST_NATIVE(kCls, "setSystemProperty", "(Ljava/lang/String;Ljava/lang/String;)V",
                        Cocoa_setSystemProperty),
+    WINAPK_HOST_NATIVE(kCls, "setSystemFontsDir", "(Ljava/lang/String;)V", Cocoa_setSystemFontsDir),
+    WINAPK_HOST_NATIVE(kCls, "setNativeLibDir", "(Ljava/lang/String;)V", Cocoa_setNativeLibDir),
+    WINAPK_HOST_NATIVE(kCls, "setDataSubdir", "(Ljava/lang/String;)V", Cocoa_setDataSubdir),
+    WINAPK_HOST_NATIVE(kCls, "applyWindowOrientation", "(I)V", Cocoa_applyWindowOrientation),
+    WINAPK_HOST_NATIVE(kCls, "applyWindowOrientationFor", "(Ljava/lang/String;III)V", Cocoa_applyWindowOrientationFor),
+    WINAPK_HOST_NATIVE(kCls, "restoreUserOrientation", "()V", Cocoa_restoreUserOrientation),
+    WINAPK_HOST_NATIVE(kCls, "windowOverrideOrientation", "(Ljava/lang/String;I)I", Cocoa_windowOverrideOrientation),
+    WINAPK_HOST_NATIVE(kCls, "activityWindowTransition", "(Ljava/lang/String;IZZIIIII)[I",
+                       Cocoa_activityWindowTransition),
+    WINAPK_HOST_NATIVE(kCls, "setTopActivityConfigChanges", "(I)V", Cocoa_setTopActivityConfigChanges),
+    WINAPK_HOST_NATIVE(kCls, "setMaxAspectRatio", "(F)V", Cocoa_setMaxAspectRatio),
+    WINAPK_HOST_NATIVE(kCls, "setContentView", "(JJ)V", Cocoa_setContentView),
+    WINAPK_HOST_NATIVE(kCls, "closeWindow", "(J)V", Cocoa_closeWindow),
+    WINAPK_HOST_NATIVE(kCls, "setSecureContent", "(Z)V", Cocoa_setSecureContent),
+    WINAPK_HOST_NATIVE(kCls, "openHostUrl", "(Ljava/lang/String;)Z", Cocoa_openHostUrl),
+    WINAPK_HOST_NATIVE(kCls, "takeHostUrls", "()[Ljava/lang/String;", Cocoa_takeHostUrls),
+    WINAPK_HOST_NATIVE(kCls, "urlSchemeHandlers", "(Ljava/lang/String;)[Ljava/lang/String;", Cocoa_urlSchemeHandlers),
+    WINAPK_HOST_NATIVE(kCls, "setUrlSchemeDefault", "(Ljava/lang/String;Ljava/lang/String;)I", Cocoa_setUrlSchemeDefault),
+    WINAPK_HOST_NATIVE(kCls, "presentOverlayBitmap", "([III)V", Cocoa_presentOverlayBitmap),
+    WINAPK_HOST_NATIVE(kCls, "clearOverlayBitmap", "()V", Cocoa_clearOverlayBitmap),
+    WINAPK_HOST_NATIVE(kCls, "hostHideWindowsForQuit", "()Z", Cocoa_hostHideWindowsForQuit),
+    WINAPK_HOST_NATIVE(kCls, "showTranslationOverlay", "(Ljava/lang/String;)V", Cocoa_showTranslationOverlay),
+    WINAPK_HOST_NATIVE(kCls, "updateTranslationOverlay", "(Ljava/lang/String;)V", Cocoa_updateTranslationOverlay),
+    WINAPK_HOST_NATIVE(kCls, "hideTranslationOverlay", "()V", Cocoa_hideTranslationOverlay),
+    WINAPK_HOST_NATIVE(kCls, "beginWithheldTick", "(Z)Z", Cocoa_beginWithheldTick),
+    WINAPK_HOST_NATIVE(kCls, "hostRenderTick", "()Z", Cocoa_hostRenderTick),
     WINAPK_HOST_NATIVE(kCls, "setWindowTitle", "(JLjava/lang/String;)V", Cocoa_setWindowTitle),
     WINAPK_HOST_NATIVE(kCls, "presentFrame", "([IIIIIIII)I", Cocoa_presentFrame),
     WINAPK_HOST_NATIVE(kCls, "setRenderer", "(JLcom/macapk/loader/MetalSurfaceCallbacks;)V", Cocoa_setRenderer),

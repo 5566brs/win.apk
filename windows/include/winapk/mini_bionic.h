@@ -32,4 +32,18 @@ const char* bionic_getenv(const char* name);
 int bionic_setenv(const char* name, const char* value, int overwrite);
 int bionic_unsetenv(const char* name);
 
+// Where Android's absolute paths live (src/bionic/paths.cpp): "/x" is
+// <android root>/x, and /system/fonts and /system/etc/fonts.xml are the fonts
+// directory Boot writes. UTF-8 host paths.
+void set_android_root(const char* dir);
+void set_system_fonts_dir(const char* dir);
+
+// The calling thread's NDK looper (ALooper, src/bionic/looper.cpp), for Java's
+// android.os.Looper (NativeLooper): one wait for a thread's Java messages and
+// its native descriptors. poll_once returns ALooper's POLL_* codes.
+void* looper_for_current_thread();
+int looper_poll_once(void* looper, int timeout_ms);
+void looper_wake(void* looper);
+bool looper_has_fds(void* looper);
+
 }  // namespace winapk
