@@ -115,6 +115,9 @@ Windows hook is unavoidable, and every such change is listed here:
 - `runtime/java/android/content/res/Resources.java`: `getIntArray` resolves the
   items of a typed `<array>` (for example a list of color references) instead
   of returning an empty array. Not Windows-specific; worth offering upstream.
+- `runtime/java/android/view/ViewPropertyAnimator.java`: starts by itself on
+  the next frame when the app never calls `start()`, as on Android. Not
+  Windows-specific; worth offering upstream.
 
 ## License
 

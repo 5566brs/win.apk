@@ -71,12 +71,38 @@ if(WINAPK_JNI_INCLUDE)
   add_executable(winapk-jvm-run tools/jvmrun_main.cpp)
   target_link_libraries(winapk-jvm-run PRIVATE winapk_jni)
 
+  # SQLite for NativeSqlite: the official amalgamation (public domain),
+  # downloaded once at configure time and checked against the SHA3-256 hash
+  # sqlite.org publishes.
+  # The feature set follows what Android's SQLite enables for apps.
+  set(WINAPK_SQLITE_VERSION 3540100)
+  set(WINAPK_SQLITE_SHA3_256 92281c86e2957f9b9305890f9ac04204caa7b677cc868dc326d942689df28e30)
+  set(WINAPK_SQLITE_DIR ${CMAKE_BINARY_DIR}/sqlite-amalgamation-${WINAPK_SQLITE_VERSION})
+  if(NOT EXISTS ${WINAPK_SQLITE_DIR}/sqlite3.c)
+    set(_zip ${CMAKE_BINARY_DIR}/sqlite-amalgamation-${WINAPK_SQLITE_VERSION}.zip)
+    file(DOWNLOAD https://www.sqlite.org/2026/sqlite-amalgamation-${WINAPK_SQLITE_VERSION}.zip ${_zip}
+         EXPECTED_HASH SHA3_256=${WINAPK_SQLITE_SHA3_256} TLS_VERIFY ON)
+    file(ARCHIVE_EXTRACT INPUT ${_zip} DESTINATION ${CMAKE_BINARY_DIR})
+  endif()
+  enable_language(C)
+  add_library(winapk_sqlite STATIC ${WINAPK_SQLITE_DIR}/sqlite3.c)
+  target_include_directories(winapk_sqlite PUBLIC ${WINAPK_SQLITE_DIR})
+  target_compile_definitions(winapk_sqlite PRIVATE
+    SQLITE_THREADSAFE=1 SQLITE_ENABLE_FTS3 SQLITE_ENABLE_FTS3_PARENTHESIS SQLITE_ENABLE_FTS4
+    SQLITE_ENABLE_FTS5 SQLITE_ENABLE_RTREE SQLITE_ENABLE_COLUMN_METADATA)
+
   # The host that runs an APK (milestone M1). Like winapk-jvm-run it loads
   # jvm.dll at runtime.
   add_executable(winapk-runtime host/runtime_main.cpp host/host_natives.cpp host/native_log.cpp
                               host/native_cocoa.cpp host/win32_window.cpp)
-  target_link_libraries(winapk-runtime PRIVATE winapk_jni)
+  target_link_libraries(winapk-runtime PRIVATE winapk_jni winapk_sqlite)
   target_compile_options(winapk-runtime PRIVATE -Wall -Wextra)
+  # Upstream's NativeSqlite bridge, compiled unchanged: compat/ supplies the
+  # few CoreFoundation string calls it makes. Upstream's warnings are not ours.
+  target_sources(winapk-runtime PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/src/native_sqlite.cpp)
+  target_include_directories(winapk-runtime PRIVATE compat)
+  set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/../runtime/src/native_sqlite.cpp
+                              PROPERTIES COMPILE_OPTIONS "-w")
 
   if(MINGW)
     target_link_options(winapk-runtime PRIVATE -static -municode)

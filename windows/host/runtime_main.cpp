@@ -30,6 +30,10 @@
 #include <jvmti.h>
 #include <windows.h>
 
+namespace macapk::sqlite {
+void RegisterNativeSqliteMethods(JNIEnv* env);  // runtime/src/native_sqlite.cpp
+}
+
 namespace fs = std::filesystem;
 
 namespace {
@@ -275,6 +279,9 @@ DWORD WINAPI boot_thread(void* param) {
     }
     std::fprintf(stderr, "[win.apk] host natives: %d classes, %d implemented, %d stubbed\n", stats.classes,
                  stats.implemented, stats.stubbed);
+    // Upstream's own NativeSqlite bridge replaces those stubs (see CMakeLists).
+    macapk::sqlite::RegisterNativeSqliteMethods(env);
+    check_exception(env, "RegisterNativeSqliteMethods");
 
     jclass boot = env->FindClass("com/macapk/loader/Boot");
     check_exception(env, "FindClass com.macapk.loader.Boot");
