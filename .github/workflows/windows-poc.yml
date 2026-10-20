@@ -40,6 +40,10 @@ jobs:
         shell: msys2 {0}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
       - uses: msys2/setup-msys2@v2
         with:
           msystem: CLANG64
@@ -52,12 +56,15 @@ jobs:
         with:
           name: guest-libs
           path: guest
-      - name: Build winapk-elfrun.exe
+      - name: Build (loader, thunks, JNI wrapper)
         run: |
-          cmake -S windows -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++
+          cmake -S windows -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++ \
+            -DWINAPK_JNI_INCLUDE="$(cygpath -u "$JAVA_HOME")/include"
           cmake --build build
       - name: Run the ABI thunk test
         run: ./build/winapk-thunk-test.exe
+      - name: Run the JNI wrapper test
+        run: ./build/winapk-jni-test.exe
       - name: Run the PoC checks
         run: ./build/winapk-elfrun.exe guest/libwinapk_poc_guest.so guest/libwinapk_poc_guest_packed.so
       - uses: actions/upload-artifact@v4
