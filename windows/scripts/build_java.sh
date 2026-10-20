@@ -24,6 +24,8 @@ set -euo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 RT="$(cd -- "$HERE/../../runtime" >/dev/null 2>&1 && pwd)"
 OUT="${1:-$HERE/../build/runtime}"
+mkdir -p "$OUT"
+OUT="$(cd -- "$OUT" && pwd)"  # absolute: the packaging steps cd elsewhere
 LIB="$OUT/lib"
 WORK="$OUT/.build"  # scratch: classes, file lists, javac log
 TMP="$WORK/classes"

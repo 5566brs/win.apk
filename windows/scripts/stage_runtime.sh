@@ -15,6 +15,8 @@ set -euo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 BUILD="${1:?cmake build dir}"
 OUT="${2:-$HERE/../build/runtime}"
+mkdir -p "$OUT"
+OUT="$(cd -- "$OUT" && pwd)"
 
 [[ -f "$BUILD/winapk-runtime.exe" ]] || { echo "[stage] no winapk-runtime.exe in $BUILD" >&2; exit 1; }
 "$HERE/build_java.sh" "$OUT"
