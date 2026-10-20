@@ -1,0 +1,244 @@
+// host_natives.cpp -- see host_natives.h.
+
+#include "host_natives.h"
+
+#include "winapk/abi_thunk.h"
+
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <string>
+#include <vector>
+
+#include <windows.h>
+
+namespace winapk::host {
+
+namespace {
+
+// Every class in runtime/java that declares native methods. A class added
+// upstream with natives and missing here fails with UnsatisfiedLinkError, which
+// names it.
+const char* const kHostClasses[] = {
+    "android.app.NativeActivity",
+    "android.content.ClipboardManager",
+    "android.opengl.EGL14",
+    "android.opengl.EGL15",
+    "android.opengl.EGLExt",
+    "android.opengl.GLES10",
+    "android.opengl.GLES11",
+    "android.opengl.GLES20",
+    "android.opengl.GLES30",
+    "android.opengl.GLES31",
+    "android.opengl.GLES31Ext",
+    "android.opengl.GLES32",
+    "android.opengl.GLUtils",
+    "android.provider.MediaStoreProvider",
+    "android.view.InputQueue",
+    "android.webkit.MacApkWebViewBridge",
+    "com.google.firebase.app.internal.cpp.CppThreadDispatcherContext",
+    "com.google.firebase.app.internal.cpp.GoogleApiAvailabilityHelper",
+    "com.google.firebase.app.internal.cpp.JniResultCallback",
+    "com.google.firebase.app.internal.cpp.Log",
+    "com.macapk.gms.NativeSignIn",
+    "com.macapk.icu.HostIcu",
+    "com.macapk.loader.AudioInputBridge",
+    "com.macapk.loader.CameraBridge",
+    "com.macapk.loader.DocumentPickerHandler",
+    "com.macapk.loader.GamepadBridge",
+    "com.macapk.loader.LocationBridge",
+    "com.macapk.loader.NativeAudio",
+    "com.macapk.loader.NativeCocoa",
+    "com.macapk.loader.NativeGles",
+    "com.macapk.loader.NativeImageCodec",
+    "com.macapk.loader.NativeLinker",
+    "com.macapk.loader.NativeLog",
+    "com.macapk.loader.NativeLooper",
+    "com.macapk.loader.NativeMedia",
+    "com.macapk.loader.NativeOs",
+    "com.macapk.loader.NativeSqlite",
+    "com.macapk.loader.monet.HostWallpaper",
+    "javax.microedition.khronos.egl.MacApkEGL10",
+};
+
+// ---- stubs -----------------------------------------------------------------
+
+struct StubTag {
+    std::string method;  // "com.macapk.loader.NativeCocoa.init()Z"
+    std::atomic<bool> reported{false};
+};
+
+// Called by every stub (make_tagged_zero_stub) before it returns zero.
+void report_stub(JNIEnv*, const void* tag) {
+    auto* t = static_cast<StubTag*>(const_cast<void*>(tag));
+    if (t->reported.exchange(true)) return;
+    std::fprintf(stderr, "[win.apk] native not implemented on Windows yet, returning 0: %s\n",
+                 t->method.c_str());
+    std::fflush(stderr);
+}
+
+// ---- com.macapk.loader.NativeLog --------------------------------------------
+
+// MACAPK_LOG_LEVEL gates the output the same way upstream's Log_print does:
+// V=2 D=3 I=4 W=5 E=6, default everything.
+int log_min_level() {
+    static const int level = [] {
+        const char* e = std::getenv("MACAPK_LOG_LEVEL");
+        return (e && *e) ? std::atoi(e) : 0;
+    }();
+    return level;
+}
+
+void JNICALL Log_print(JNIEnv* env, jclass, jint level, jstring tag_j, jstring msg_j) {
+    if (level < log_min_level()) return;
+    const char* tag = tag_j ? env->GetStringUTFChars(tag_j, nullptr) : "";
+    const char* msg = msg_j ? env->GetStringUTFChars(msg_j, nullptr) : "";
+    const char* lv = level <= 2 ? "V" : level == 3 ? "D" : level == 4 ? "I" : level == 5 ? "W" : "E";
+    std::fprintf(stderr, "[%s] %s: %s\n", lv, tag, msg);
+    if (tag_j) env->ReleaseStringUTFChars(tag_j, tag);
+    if (msg_j) env->ReleaseStringUTFChars(msg_j, msg);
+}
+
+// Nanoseconds since the host process started, for Boot's timing lines.
+jlong JNICALL Log_bootTimeNanos(JNIEnv*, jclass) {
+    static const ULONGLONG start = [] {
+        FILETIME created, exited, kernel, user;
+        GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user);
+        return (static_cast<ULONGLONG>(created.dwHighDateTime) << 32) | created.dwLowDateTime;
+    }();
+    FILETIME now;
+    GetSystemTimePreciseAsFileTime(&now);
+    const ULONGLONG t = (static_cast<ULONGLONG>(now.dwHighDateTime) << 32) | now.dwLowDateTime;
+    return static_cast<jlong>((t - start) * 100);  // FILETIME ticks are 100 ns
+}
+
+struct Implementation {
+    const char* clazz;
+    JNINativeMethod method;
+};
+
+#define WINAPK_NATIVE(clazz, name, sig, fn) \
+    {clazz, {const_cast<char*>(name), const_cast<char*>(sig), reinterpret_cast<void*>(&fn)}}
+
+const Implementation kImplementations[] = {
+    WINAPK_NATIVE("com.macapk.loader.NativeLog", "print", "(ILjava/lang/String;Ljava/lang/String;)V",
+                  Log_print),
+    WINAPK_NATIVE("com.macapk.loader.NativeLog", "nativeBootTimeNanos", "()J", Log_bootTimeNanos),
+};
+
+#undef WINAPK_NATIVE
+
+const JNINativeMethod* implementation_of(const char* clazz, const char* name, const char* sig) {
+    for (const Implementation& i : kImplementations) {
+        if (std::strcmp(i.clazz, clazz) == 0 && std::strcmp(i.method.name, name) == 0 &&
+            std::strcmp(i.method.signature, sig) == 0) {
+            return &i.method;
+        }
+    }
+    return nullptr;
+}
+
+// ---- reflection helpers -----------------------------------------------------
+
+struct Reflection {
+    jclass class_class, method_class, loader_class;
+    jmethodID for_name, declared_methods, modifiers, system_loader;
+    jobject loader;
+};
+
+bool init_reflection(JNIEnv* env, Reflection* r) {
+    r->class_class = env->FindClass("java/lang/Class");
+    r->method_class = env->FindClass("java/lang/reflect/Method");
+    r->loader_class = env->FindClass("java/lang/ClassLoader");
+    if (!r->class_class || !r->method_class || !r->loader_class) return false;
+    r->for_name = env->GetStaticMethodID(r->class_class, "forName",
+                                         "(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;");
+    r->declared_methods = env->GetMethodID(r->class_class, "getDeclaredMethods", "()[Ljava/lang/reflect/Method;");
+    r->modifiers = env->GetMethodID(r->method_class, "getModifiers", "()I");
+    r->system_loader = env->GetStaticMethodID(r->loader_class, "getSystemClassLoader", "()Ljava/lang/ClassLoader;");
+    if (!r->for_name || !r->declared_methods || !r->modifiers || !r->system_loader) return false;
+    r->loader = env->CallStaticObjectMethod(r->loader_class, r->system_loader);
+    return r->loader && !env->ExceptionCheck();
+}
+
+// Loads `name` without initializing it: binding natives must not run static
+// initializers early, some of which call the very natives being bound.
+jclass load_class(JNIEnv* env, const Reflection& r, const char* name) {
+    jstring jname = env->NewStringUTF(name);
+    auto cls = static_cast<jclass>(
+        env->CallStaticObjectMethod(r.class_class, r.for_name, jname, JNI_FALSE, r.loader));
+    env->DeleteLocalRef(jname);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return nullptr;
+    }
+    return cls;
+}
+
+constexpr jint kAccNative = 0x100;
+
+}  // namespace
+
+bool register_host_natives(JNIEnv* env, jvmtiEnv* jvmti, NativeStats* stats) {
+    Reflection r{};
+    if (!init_reflection(env, &r)) {
+        env->ExceptionClear();
+        return false;
+    }
+    for (const char* clazz : kHostClasses) {
+        jclass cls = load_class(env, r, clazz);
+        if (!cls) {
+            std::fprintf(stderr, "[win.apk] host class %s is not on the classpath; skipped\n", clazz);
+            continue;
+        }
+        ++stats->classes;
+        auto methods = static_cast<jobjectArray>(env->CallObjectMethod(cls, r.declared_methods));
+        if (env->ExceptionCheck() || !methods) {
+            env->ExceptionDescribe();
+            env->ExceptionClear();
+            continue;
+        }
+        std::vector<JNINativeMethod> bind;
+        std::deque<std::string> strings;  // stable storage for bind's names until RegisterNatives
+        const jsize n = env->GetArrayLength(methods);
+        for (jsize i = 0; i < n; ++i) {
+            jobject m = env->GetObjectArrayElement(methods, i);
+            const jint mods = env->CallIntMethod(m, r.modifiers);
+            if (mods & kAccNative) {
+                char* name = nullptr;
+                char* sig = nullptr;
+                if (jvmti->GetMethodName(env->FromReflectedMethod(m), &name, &sig, nullptr) ==
+                    JVMTI_ERROR_NONE) {
+                    if (const JNINativeMethod* impl = implementation_of(clazz, name, sig)) {
+                        bind.push_back(*impl);
+                        ++stats->implemented;
+                    } else {
+                        auto* tag = new StubTag();
+                        tag->method = std::string(clazz) + "." + name + sig;
+                        void* stub = make_tagged_zero_stub(reinterpret_cast<void*>(&report_stub), tag);
+                        strings.emplace_back(name);
+                        char* name_copy = &strings.back()[0];
+                        strings.emplace_back(sig);
+                        bind.push_back({name_copy, &strings.back()[0], stub});
+                        ++stats->stubbed;
+                    }
+                    jvmti->Deallocate(reinterpret_cast<unsigned char*>(name));
+                    jvmti->Deallocate(reinterpret_cast<unsigned char*>(sig));
+                }
+            }
+            env->DeleteLocalRef(m);
+        }
+        if (!bind.empty() && env->RegisterNatives(cls, bind.data(), static_cast<jint>(bind.size())) != JNI_OK) {
+            env->ExceptionDescribe();
+            env->ExceptionClear();
+            std::fprintf(stderr, "[win.apk] RegisterNatives failed for %s\n", clazz);
+        }
+        env->DeleteLocalRef(methods);
+        env->DeleteLocalRef(cls);
+    }
+    return true;
+}
+
+}  // namespace winapk::host

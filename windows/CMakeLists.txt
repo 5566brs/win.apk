@@ -71,7 +71,14 @@ if(WINAPK_JNI_INCLUDE)
   add_executable(winapk-jvm-run tools/jvmrun_main.cpp)
   target_link_libraries(winapk-jvm-run PRIVATE winapk_jni)
 
+  # The host that runs an APK (milestone M1). Like winapk-jvm-run it loads
+  # jvm.dll at runtime.
+  add_executable(winapk-runtime host/runtime_main.cpp host/host_natives.cpp)
+  target_link_libraries(winapk-runtime PRIVATE winapk_jni)
+  target_compile_options(winapk-runtime PRIVATE -Wall -Wextra)
+
   if(MINGW)
+    target_link_options(winapk-runtime PRIVATE -static -municode)
     target_link_options(winapk-jni-test PRIVATE -static)
     target_link_options(winapk-jni-variadic-test PRIVATE -static)
     target_link_options(winapk-jvm-run PRIVATE -static)
