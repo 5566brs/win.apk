@@ -38,7 +38,23 @@ public class ViewPropertyAnimator {
     public ViewPropertyAnimator() { this.target = null; }
     public ViewPropertyAnimator(View target) { this.target = target; }
 
-    private ViewPropertyAnimator add(int kind, float v, boolean by) { props.add(new Prop(kind, v, by)); return this; }
+    // AOSP starts the animation on the next frame when the caller never calls
+    // start(): every property call posts mAnimationStarter with
+    // View.postOnAnimation, and start() removes it and starts at once. Apps
+    // routinely write view.animate().alpha(1f) with no start() (a fade-in in
+    // onPostCreate, say); without this the property never moved. The pending
+    // properties are consumed by the start, so a later call animates only
+    // what it adds, as in AOSP.
+    private final Runnable implicitStart = () -> { implicitStartPosted = false; start(); };
+    private boolean implicitStartPosted;
+    private ViewPropertyAnimator add(int kind, float v, boolean by) {
+        props.add(new Prop(kind, v, by));
+        if (target != null && !implicitStartPosted) {
+            implicitStartPosted = true;
+            target.postOnAnimation(implicitStart);
+        }
+        return this;
+    }
     public ViewPropertyAnimator x(float v)               { return add(0, v, false); }
     public ViewPropertyAnimator y(float v)               { return add(1, v, false); }
     public ViewPropertyAnimator xBy(float v)             { return add(0, v, true); }
@@ -115,12 +131,18 @@ public class ViewPropertyAnimator {
     }
 
     public void start() {
-        final int n = props.size();
+        if (implicitStartPosted) {
+            implicitStartPosted = false;
+            if (target != null) target.removeCallbacks(implicitStart);
+        }
+        final Prop[] ps = props.toArray(new Prop[0]);
+        props.clear();
+        final int n = ps.length;
         final float[] starts = new float[n];
         final float[] ends = new float[n];
         if (target != null) {
             for (int i = 0; i < n; i++) {
-                Prop p = props.get(i);
+                Prop p = ps[i];
                 float s = getProp(p.kind);
                 starts[i] = s;
                 ends[i] = p.by ? s + p.value : p.value;
@@ -129,7 +151,7 @@ public class ViewPropertyAnimator {
         if (target == null || !android.os.Looper.MACAPK_REAL_LOOPER) {
             // Shipped path: snap to the final values and run actions immediately.
             if (startAction != null) try { startAction.run(); } catch (Throwable ignored) {}
-            for (int i = 0; i < n; i++) setProp(props.get(i).kind, ends[i]);
+            for (int i = 0; i < n; i++) setProp(ps[i].kind, ends[i]);
             if (endAction != null) try { endAction.run(); } catch (Throwable ignored) {}
             // setListener/setUpdateListener: AOSP fires the lifecycle callbacks
             // even for an instantaneous/duration-0 completion. Reuse
@@ -162,12 +184,12 @@ public class ViewPropertyAnimator {
         }
         anim.addUpdateListener(a -> {
             float f = a.getAnimatedFraction();
-            for (int i = 0; i < n; i++) setProp(props.get(i).kind, starts[i] + (ends[i] - starts[i]) * f);
+            for (int i = 0; i < n; i++) setProp(ps[i].kind, starts[i] + (ends[i] - starts[i]) * f);
         });
         if (updateListener != null) anim.addUpdateListener(updateListener);
         anim.addListener(new android.animation.Animator.AnimatorListenerAdapter() {
             @Override public void onAnimationEnd(android.animation.Animator a) {
-                for (int i = 0; i < n; i++) setProp(props.get(i).kind, ends[i]);
+                for (int i = 0; i < n; i++) setProp(ps[i].kind, ends[i]);
                 if (endAction != null) try { endAction.run(); } catch (Throwable ignored) {}
             }
         });
