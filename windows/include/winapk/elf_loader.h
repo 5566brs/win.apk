@@ -17,7 +17,8 @@
 // Not handled yet (the loader fails with a clear message instead):
 //   * ELF TLS relocations (R_X86_64_DTPMOD64/DTPOFF64/TPOFF64).
 //   * DT_NEEDED between guest libraries is reported, not followed: the caller's
-//     resolver decides what an undefined symbol binds to.
+//     resolver decides what an undefined symbol binds to. GuestLinker
+//     (linker.h) is the caller that follows it.
 
 #pragma once
 
@@ -44,10 +45,29 @@ struct LoadOptions {
 
 class ElfImage {
 public:
+    // map() + link() + initialize(), for a library with no guest dependencies.
     static std::unique_ptr<ElfImage> load(const std::filesystem::path& path,
                                           const SymbolResolver& resolve,
                                           std::string* error,
                                           const LoadOptions& options = {});
+
+    // The three phases separately, for a linker that loads a whole DT_NEEDED
+    // tree: map every library first, then link each one against the others,
+    // then run constructors dependencies first. This is bionic's order
+    // (find_libraries), and it is what lets two libraries refer to each other.
+    //
+    // map: steps 1 and 2. Exports and DT_NEEDED are readable afterwards, but
+    // the image is not relocated and must not be called.
+    static std::unique_ptr<ElfImage> map(const std::filesystem::path& path, std::string* error,
+                                         const LoadOptions& options = {});
+    // link: steps 3 and 4. IRELATIVE resolvers run here, so this is the first
+    // point at which guest code executes. Calling it again is a no-op.
+    bool link(const SymbolResolver& resolve, std::string* error);
+    // initialize: step 5. Runs once; does nothing before link() succeeded.
+    void initialize();
+    bool linked() const { return linked_; }
+    bool initialized() const { return initialized_; }
+
     ~ElfImage();
 
     ElfImage(const ElfImage&) = delete;
@@ -56,6 +76,19 @@ public:
     // Address of an exported (defined, global or weak) symbol, or nullptr.
     void* dlsym(const char* name) const;
 
+    // True if `p` lies inside the mapped image.
+    bool contains(const void* p) const {
+        const auto a = reinterpret_cast<uintptr_t>(p);
+        const auto lo = reinterpret_cast<uintptr_t>(mem_);
+        return a >= lo && a - lo < size_;
+    }
+
+    // The defined dynamic symbol whose [value, value + size) covers `p`, for
+    // dladdr. Returns false if there is none.
+    bool symbol_at(const void* p, const char** name, void** start) const;
+
+    const std::filesystem::path& path() const { return path_; }
+    const void* base() const { return mem_; }
     const std::string& soname() const { return soname_; }
     const std::vector<std::string>& needed() const { return needed_; }
     uintptr_t load_bias() const { return bias_; }
@@ -99,14 +132,17 @@ private:
     uint64_t init_ = 0, fini_ = 0;
     uint64_t init_array_ = 0, init_arraysz_ = 0, fini_array_ = 0, fini_arraysz_ = 0;
 
+    std::filesystem::path path_;
     std::string soname_;
     std::vector<std::string> needed_;
+    size_t nsyms_ = 0;
     std::unordered_map<std::string, uintptr_t> exports_;
     std::vector<uint64_t> irelative_slots_;  // vaddrs; resolved after protect
     std::vector<int64_t> irelative_addends_;
 
     size_t fs_sites_patched_ = 0;
     size_t relocs_applied_ = 0;
+    bool linked_ = false;
     bool initialized_ = false;
 };
 

@@ -99,6 +99,14 @@ std::unique_ptr<ElfImage> ElfImage::load(const std::filesystem::path& path,
                                          const SymbolResolver& resolve,
                                          std::string* error,
                                          const LoadOptions& options) {
+    std::unique_ptr<ElfImage> img = map(path, error, options);
+    if (!img || !img->link(resolve, error)) return nullptr;
+    img->initialize();
+    return img;
+}
+
+std::unique_ptr<ElfImage> ElfImage::map(const std::filesystem::path& path, std::string* error,
+                                        const LoadOptions& options) {
     std::vector<uint8_t> file;
     if (!read_file(path, &file, error)) return nullptr;
 
@@ -135,6 +143,7 @@ std::unique_ptr<ElfImage> ElfImage::load(const std::filesystem::path& path,
     }
 
     std::unique_ptr<ElfImage> img(new ElfImage());
+    img->path_ = path;
     for (int i = 0; i < eh.e_phnum; ++i) {
         Phdr ph;
         std::memcpy(&ph, file.data() + eh.e_phoff + i * sizeof(Phdr), sizeof(ph));
@@ -176,14 +185,22 @@ std::unique_ptr<ElfImage> ElfImage::load(const std::filesystem::path& path,
         }
     }
 
-    if (!img->apply_relocations(resolve, error)) return nullptr;
-    if (!img->protect_segments(error)) return nullptr;
-    if (!img->apply_irelative(error)) return nullptr;
-    img->seal_relro();
-    FlushInstructionCache(GetCurrentProcess(), img->mem_, img->size_);
-
-    img->run_initializers();
     return img;
+}
+
+bool ElfImage::link(const SymbolResolver& resolve, std::string* error) {
+    if (linked_) return true;
+    if (!apply_relocations(resolve, error)) return false;
+    if (!protect_segments(error)) return false;
+    if (!apply_irelative(error)) return false;
+    seal_relro();
+    FlushInstructionCache(GetCurrentProcess(), mem_, size_);
+    linked_ = true;
+    return true;
+}
+
+void ElfImage::initialize() {
+    if (linked_ && !initialized_) run_initializers();
 }
 
 ElfImage::~ElfImage() {
@@ -292,6 +309,7 @@ bool ElfImage::read_dynamic(std::string* error) {
             nsyms = symoffset;
         }
     }
+    nsyms_ = nsyms;
     const Sym* syms = at<const Sym>(symtab_);
     for (size_t i = 1; i < nsyms; ++i) {
         const Sym& s = syms[i];
@@ -558,6 +576,25 @@ void ElfImage::run_finalizers() {
 void* ElfImage::dlsym(const char* name) const {
     auto it = exports_.find(name);
     return it == exports_.end() ? nullptr : reinterpret_cast<void*>(it->second);
+}
+
+bool ElfImage::symbol_at(const void* p, const char** name, void** start) const {
+    // Like bionic's soinfo::find_symbol_by_address: only a defined symbol whose
+    // [value, value + size) covers the address counts.
+    if (!contains(p)) return false;
+    const uint64_t addr = reinterpret_cast<uintptr_t>(p);
+    const Sym* syms = at<const Sym>(symtab_);
+    const char* strtab = at<const char>(strtab_);
+    for (size_t i = 1; i < nsyms_; ++i) {
+        const Sym& s = syms[i];
+        if (s.st_shndx == kShnUndef || s.st_name >= strsz_) continue;
+        const uint64_t lo = bias_ + s.st_value;
+        if (addr < lo || addr - lo >= s.st_size) continue;
+        *name = strtab + s.st_name;
+        *start = reinterpret_cast<void*>(lo);
+        return true;
+    }
+    return false;
 }
 
 }  // namespace winapk
