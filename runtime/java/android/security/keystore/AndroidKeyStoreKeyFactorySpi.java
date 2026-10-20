@@ -142,21 +142,43 @@ public class AndroidKeyStoreKeyFactorySpi extends java.security.KeyFactorySpi {
     @Override
     protected java.security.PublicKey engineGeneratePublic(java.security.spec.KeySpec spec)
             throws java.security.spec.InvalidKeySpecException {
-        try {
-            return java.security.KeyFactory.getInstance(mAlgorithm).generatePublic(spec);
-        } catch (java.security.NoSuchAlgorithmException e) {
-            throw new java.security.spec.InvalidKeySpecException(e);
-        }
+        return (java.security.PublicKey) generateElsewhere(spec, true);
     }
 
     @Override
     protected java.security.PrivateKey engineGeneratePrivate(java.security.spec.KeySpec spec)
             throws java.security.spec.InvalidKeySpecException {
-        try {
-            return java.security.KeyFactory.getInstance(mAlgorithm).generatePrivate(spec);
-        } catch (java.security.NoSuchAlgorithmException e) {
-            throw new java.security.spec.InvalidKeySpecException(e);
+        return (java.security.PrivateKey) generateElsewhere(spec, false);
+    }
+
+    /** Hands key generation to the other providers of this algorithm, in
+     *  priority order, never to AndroidKeyStore itself. A plain
+     *  KeyFactory.getInstance(mAlgorithm) is not enough: when the first
+     *  provider rejects the spec, KeyFactory fails over to the next one, which
+     *  ends at AndroidKeyStore (registered last), which asked getInstance
+     *  again -- a StackOverflowError instead of the InvalidKeySpecException
+     *  the app catches (Noice). */
+    private Object generateElsewhere(java.security.spec.KeySpec spec, boolean pub)
+            throws java.security.spec.InvalidKeySpecException {
+        java.security.spec.InvalidKeySpecException last = null;
+        java.security.Provider[] providers =
+            java.security.Security.getProviders("KeyFactory." + mAlgorithm);
+        if (providers != null) {
+            for (java.security.Provider p : providers) {
+                if (p instanceof AndroidKeyStoreProvider) continue;
+                try {
+                    java.security.KeyFactory kf = java.security.KeyFactory.getInstance(mAlgorithm, p);
+                    return pub ? kf.generatePublic(spec) : kf.generatePrivate(spec);
+                } catch (java.security.spec.InvalidKeySpecException e) {
+                    last = e;
+                } catch (java.security.NoSuchAlgorithmException e) {
+                    // listed but not instantiable: try the next one
+                }
+            }
         }
+        if (last != null) throw last;
+        throw new java.security.spec.InvalidKeySpecException(
+            "no provider other than AndroidKeyStore implements KeyFactory." + mAlgorithm);
     }
 
     @Override
