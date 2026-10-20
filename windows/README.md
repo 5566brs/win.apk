@@ -70,6 +70,14 @@ tests on a real `windows-latest` runner.
 Toolchain: clang only. MSVC cannot emit System V calls, and mingw GCC 13 emits
 broken SEH unwind data for `sysv_abi` functions.
 
+## Trying it
+
+Every CI run on `windows-latest` uploads a `winapk-preview` artifact: a
+ready-to-run folder with the runtime, a Java runtime and `Run APK.bat`. Unzip
+it and drag an `.apk` onto `Run APK.bat`. Its `README.txt` says what works
+and where the logs are. The folder comes from `windows/package/` plus the
+staged runtime.
+
 ## Running an APK
 
 ```sh

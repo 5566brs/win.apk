@@ -58,7 +58,7 @@ jobs:
         with:
           msystem: CLANG64
           update: true
-          install: unzip
+          install: unzip zip
           pacboy: >-
             clang:p
             cmake:p
@@ -91,7 +91,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: thirdparty/framework-res
-          key: framework-res-${{ hashFiles('scripts/build_framework_res.sh', 'windows/scripts/build_framework_res.sh') }}
+          key: framework-res-v2-${{ hashFiles('scripts/build_framework_res.sh', 'windows/scripts/build_framework_res.sh') }}
       - name: Stage the runtime
         run: |
           export JAVA_HOME="$(cygpath -u "$JAVA_HOME")"
@@ -116,6 +116,20 @@ jobs:
             > window.log 2>&1 || { tail -n 200 window.log; exit 1; }
           if grep -E "running headless|running without a window" window.log; then exit 1; fi
           grep -E "frames presented" window.log
+      # A ready-to-run folder for trying apps by hand: the staged runtime, a
+      # Java runtime and the drag-and-drop launcher.
+      - name: Package a preview
+        run: |
+          curl -sSfL -o jre.zip "https://api.adoptium.net/v3/binary/latest/21/ga/windows/x64/jre/hotspot/normal/eclipse"
+          mkdir jre-unpacked
+          unzip -q jre.zip -d jre-unpacked
+          mv jre-unpacked/* runtime/jre
+          cp "windows/package/Run APK.bat" windows/package/README.txt runtime/
+          test -f runtime/jre/bin/server/jvm.dll
+      - uses: actions/upload-artifact@v4
+        with:
+          name: winapk-preview
+          path: runtime/
       - uses: actions/upload-artifact@v4
         if: always()
         with:
