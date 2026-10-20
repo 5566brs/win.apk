@@ -35,6 +35,7 @@ struct HostMethods {
 // The implementations, one file per Java class.
 HostMethods native_log_methods();    // native_log.cpp
 HostMethods native_cocoa_methods();  // native_cocoa.cpp (headless for now)
+HostMethods native_linker_methods(); // guest_libs.cpp
 
 // The app's directory under the data directory, where Boot renders the
 // launcher icon (icon.png) that becomes the window's icon. native_cocoa.cpp.

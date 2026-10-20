@@ -41,6 +41,11 @@ struct LoadOptions {
     // useful to show that guest code built with a stack protector crashes
     // without it.
     bool patch_fs_stack_guard = true;
+    // Called for an undefined, non-weak symbol nobody defines. A non-null
+    // result is bound in its place (the runtime binds a stub that reports the
+    // name when called); null keeps the default, failing the link and listing
+    // every such symbol.
+    SymbolResolver unresolved;
 };
 
 class ElfImage {
@@ -75,6 +80,8 @@ public:
 
     // Address of an exported (defined, global or weak) symbol, or nullptr.
     void* dlsym(const char* name) const;
+    // Every exported symbol and its address.
+    const std::unordered_map<std::string, uintptr_t>& exports() const { return exports_; }
 
     // True if `p` lies inside the mapped image.
     bool contains(const void* p) const {
@@ -133,6 +140,7 @@ private:
     uint64_t init_array_ = 0, init_arraysz_ = 0, fini_array_ = 0, fini_arraysz_ = 0;
 
     std::filesystem::path path_;
+    LoadOptions options_;
     std::string soname_;
     std::vector<std::string> needed_;
     size_t nsyms_ = 0;

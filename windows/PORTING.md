@@ -144,6 +144,7 @@ Everything in this section is merged on `main` and tested in CI on
 | `src/jni_variadic.cpp` | The `Call<T>Method`, `Call<T>MethodV` and `NewObject` families. Reads the argument stream against the method signature and calls HotSpot's `Call<T>MethodA` form |
 | `src/jni_bind.cpp` | Binds guest natives into HotSpot: the guest `RegisterNatives` slot wraps each function in a thunk, and a JVMTI `NativeMethodBind` hook swaps guest addresses for thunks. Thunks are cached per function and signature. Also the cached JVMTI signature provider |
 | `java/com/winapk/tools/AppInstall.java` | `winapk-tools.jar`: installs an APK or a split bundle (`.apkm`, `.xapk`, `.apks`) in the device layout upstream reads, `data/app/~~<nonce>/<package>-<nonce>/` with `base.apk` (a hard link for a plain APK), `split_<name>.apk` (chosen as upstream's `SelectBundleApks` does) and the host ABI's libraries in `lib/<isa>/` |
+| `host/guest_libs.cpp`, `host/guest_stub.cpp`, `host/translator_main.cpp` | An app's x86_64 native libraries (M4): `macapk-translator.exe` copies `winapk-guest-stub.dll` per library, the stub's `JNI_OnLoad` loads the ELF through the linker, `NativeLibrary.findEntry0` resolves natives by name, missing system functions become reporting stubs |
 | `host/runtime_main.cpp` | `winapk-runtime`, the host that runs an APK: installs the app first (above, once per input file), converts its DEX with upstream's converter (cached), creates the JVM in-process with upstream's options, binds the host natives and calls `Boot.run` |
 | `host/host_natives.cpp` | Binds every native method of upstream's 39 host classes: the Windows implementation where there is one, otherwise a stub that returns zero and logs its name on first call |
 | `host/native_log.cpp`, `host/native_cocoa.cpp` | `NativeLog`, and `NativeCocoa`: screen metrics, a 60 Hz render tick driving the app's renderer, presents, input delivery to `TouchDispatcher`, and headless mode (frames optionally written to a BMP) |
@@ -193,7 +194,7 @@ implements in `runtime/src`; on Windows `windows/host/native_*.cpp`):
 | `NativeSqlite` | 26 | `native_sqlite.cpp` | upstream file + CoreFoundation shim | done | - |
 | `NativeOs` | 18 | `native_os.cpp` | raw file descriptors and the guest environment, on the Windows CRT | not started | 1 |
 | `NativeLooper` | 12 | `native_methods.cpp` | the guest's `ALooper`, with M4 | not started | 2 |
-| `NativeLinker` | 3 | `native_linker.cpp` | the ELF linker (M4) | not started | 1 |
+| `NativeLinker` | 3 | `native_linker.cpp` | `host/guest_libs.cpp` | done | - |
 | `NativeAudio` | 41 | `audio_backend.mm` | WASAPI | not started | 2 |
 | `NativeMedia` | 38 | `media_decode.mm`, `video_toolbox.mm`, `video_vp8/vp9_decode.mm` | Media Foundation, libvpx | not started | 2 |
 | `NativeImageCodec` | 3 | `native_methods.cpp` | WIC | not started | 2 |
@@ -223,15 +224,15 @@ implements in `runtime/src`; on Windows `windows/host/native_*.cpp`):
 | `window_policy.cpp`, `window_traits.cpp` | 3,009 | window shape per activity, orientation, resize | `win32_window.cpp` | phone size only |
 | `apk_native_exec.cpp` | 509 | APK-shipped executables | later (M5) | not started |
 | `app_process_group.cpp` | 66 | child processes die with the app | Job objects | not started |
-| `app_native_stub.cpp` | 19 | no-op library for unloadable `.so` | a stub DLL (M4) | not started |
+| `app_native_stub.cpp` | 19 | no-op library for unloadable `.so` | not needed: a library that cannot load fails as on Android | - |
 | `host_keymap.h` | 157 | host keys to Android keys | `android_key_code` in `win32_window.cpp` | done |
 
 **Native code support** (`runtime/translator/src`):
 
 | Mac source | Lines | What it does | Windows | Status |
 |---|---|---|---|---|
-| `arm64_native.cpp`, `arm64_pack.cpp`, `arm64_macho_emit.cpp` | 17,585 | load arm64 `.so` on Apple Silicon | `src/elf_loader.cpp`, `src/linker.cpp` (x86_64) | loader done, not wired in (M4) |
-| `main.cpp` (translator CLI) | 9,744 | `.so` to a host library | a `macapk-translator.exe` that writes a stub DLL (M4) | not started |
+| `arm64_native.cpp`, `arm64_pack.cpp`, `arm64_macho_emit.cpp` | 17,585 | load arm64 `.so` on Apple Silicon | `src/elf_loader.cpp`, `src/linker.cpp`, `host/guest_libs.cpp` (x86_64) | done, ELF TLS missing |
+| `main.cpp` (translator CLI) | 9,744 | `.so` to a host library | `host/translator_main.cpp` + `host/guest_stub.cpp` | done |
 | `bionic_shim.cpp` | 66,962 | Android's libc, libdl, liblog, libm, libandroid... on Darwin | `src/mini_bionic.cpp` on the Windows CRT and Win32 (M5) | 23 functions |
 | `bionic_shim_jni_bare.cpp`, `_jni_cxxwrap.cpp` | 1,119 | variadic JNI calls | `src/jni_variadic.cpp` | done |
 | `bionic_shim_sigchain.cpp`, `_signal.cpp` | 1,913 | signals and chaining with the JVM | vectored exception handling (M5) | not started |
@@ -423,6 +424,19 @@ nobody has to find them again.
   `databases\D:\...` and failed to open. Fixed with `File.isAbsolute()`
   (listed in `README.md`). Wine did not show it; the sweep on a Windows runner
   did.
+- HotSpot finds a native method by name through `ClassLoader.findNative`,
+  which ends in the static native `jdk.internal.loader.NativeLibrary.findEntry0`
+  (`java.dll`). Replacing that one method with `RegisterNatives` lets a guest
+  library answer the lookup with its ELF symbols, and the existing
+  `NativeMethodBind` hook then puts a signature-correct thunk in place of the
+  raw address. HotSpot logs one warning for it ("Re-registering of platform
+  native method"); it is expected.
+- The guest linker asks the host shim first, before the guest libraries, so a
+  catch-all for missing system functions cannot live in the shim: it would
+  shadow calls between the app's own libraries. It is the ELF loader's last
+  resort instead (`LoadOptions::unresolved`), for non-weak symbols only.
+- Chrome 155's small `libchromium_android_linker.so` was the first real app
+  library to load and run its `JNI_OnLoad`; `libchrome.so` needs ELF TLS.
 - Under Wine, a window needs an X display. `Xvfb :99` plus `xdotool` (clicks,
   keys) and ImageMagick's `import -window root` (screenshots) are enough to
   drive an app from a script.
@@ -659,13 +673,20 @@ Done:
 - `DT_NEEDED` loading (constructors only) and bionic's symbol scopes.
 - Guest `dlopen`, `dlsym`, `dladdr` and `dlerror` backed by the registry.
 - A JVMTI signature provider with a cache.
+- The whole `System.loadLibrary` path, with upstream's class loader unchanged
+  (`host/guest_libs.h`): `macapk-translator.exe` copies one stub DLL per app
+  library, the stub's `JNI_OnLoad` has the runtime load the ELF through the
+  linker and run the guest's `JNI_OnLoad`, and natives bound by name resolve
+  through a replaced `NativeLibrary.findEntry0` plus the `NativeMethodBind`
+  thunk. No per-symbol exports are needed.
+- `NativeLinker.nativeLinkOnly` (dependencies without `JNI_OnLoad`).
+- System functions the shim lacks are bound to stubs that report their name
+  on the first call, so libraries load and the sweep can rank the gaps.
 
 Remaining:
 
-- Per-library stub DLLs returned by `findLibrary`, with a host `JNI_OnLoad`
-  that loads the image through the linker and calls the guest's, and an
-  export per `Java_*` symbol (section 6).
-- The Java side: `findLibrary` returning the stub's path.
+- ELF TLS (`PT_TLS` and its relocations). Chrome's `libchrome.so` needs it;
+  every library built for API 29+ may.
 - `FindClass` with the semantics from section 6.
 
 Exit: an app with small, self-contained x86_64 JNI libraries works through the

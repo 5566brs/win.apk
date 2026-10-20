@@ -2,6 +2,7 @@
 # stage_runtime.sh -- assembles a runnable Win.apk runtime folder:
 #
 #   <out>/bin/winapk-runtime.exe
+#   <out>/bin/macapk-translator.exe, winapk-guest-stub.dll (app native libraries)
 #   <out>/bin/tools/framework-res.apk
 #   <out>/lib/*.jar, java_base_patch/, jdk_unsupported_patch/
 #
@@ -21,6 +22,6 @@ OUT="$(cd -- "$OUT" && pwd)"
 [[ -f "$BUILD/winapk-runtime.exe" ]] || { echo "[stage] no winapk-runtime.exe in $BUILD" >&2; exit 1; }
 "$HERE/build_java.sh" "$OUT"
 "$HERE/build_framework_res.sh" "$OUT/bin/tools/framework-res.apk"
-cp -f "$BUILD/winapk-runtime.exe" "$OUT/bin/"
+cp -f "$BUILD/winapk-runtime.exe" "$BUILD/macapk-translator.exe" "$BUILD/winapk-guest-stub.dll" "$OUT/bin/"
 rm -rf "$OUT/.build"  # build_java.sh's scratch, not part of the runtime
 echo "[stage] runtime staged in $OUT"

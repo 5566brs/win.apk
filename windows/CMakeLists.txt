@@ -94,7 +94,7 @@ if(WINAPK_JNI_INCLUDE)
   # The host that runs an APK (milestone M1). Like winapk-jvm-run it loads
   # jvm.dll at runtime.
   add_executable(winapk-runtime host/runtime_main.cpp host/host_natives.cpp host/native_log.cpp
-                              host/native_cocoa.cpp host/win32_window.cpp)
+                              host/native_cocoa.cpp host/win32_window.cpp host/guest_libs.cpp)
   target_link_libraries(winapk-runtime PRIVATE winapk_jni winapk_sqlite windowscodecs ole32)
   target_compile_options(winapk-runtime PRIVATE -Wall -Wextra)
   # Upstream's NativeSqlite bridge, compiled unchanged: compat/ supplies the
@@ -104,7 +104,18 @@ if(WINAPK_JNI_INCLUDE)
   set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/../runtime/src/native_sqlite.cpp
                               PROPERTIES COMPILE_OPTIONS "-w")
 
+  # An app's native libraries (milestone M4, host/guest_libs.h): the stub DLL
+  # that stands for each one and the translator that copies it. Built with the
+  # runtime, which loads them.
+  add_library(winapk-guest-stub SHARED host/guest_stub.cpp)
+  set_target_properties(winapk-guest-stub PROPERTIES PREFIX "")
+  target_include_directories(winapk-guest-stub PRIVATE "${WINAPK_JNI_INCLUDE}" "${WINAPK_JNI_INCLUDE}/win32")
+  add_executable(macapk-translator host/translator_main.cpp)
+  add_dependencies(winapk-runtime winapk-guest-stub macapk-translator)
+
   if(MINGW)
+    target_link_options(winapk-guest-stub PRIVATE -static)
+    target_link_options(macapk-translator PRIVATE -static -municode)
     target_link_options(winapk-runtime PRIVATE -static -municode)
     target_link_options(winapk-jni-test PRIVATE -static)
     target_link_options(winapk-jni-variadic-test PRIVATE -static)

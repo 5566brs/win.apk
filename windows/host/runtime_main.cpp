@@ -17,6 +17,7 @@
 // App data lives under %LOCALAPPDATA%\Win.apk unless --data says otherwise.
 // There is no window yet (milestone M2); what the app does shows in the log.
 
+#include "guest_libs.h"
 #include "host_natives.h"
 
 #include <algorithm>
@@ -322,6 +323,10 @@ DWORD WINAPI boot_thread(void* param) {
     }
     std::fprintf(stderr, "[win.apk] host natives: %d classes, %d implemented, %d stubbed\n", stats.classes,
                  stats.implemented, stats.stubbed);
+    // The app's own native libraries load through the guest linker.
+    if (!winapk::host::guest_libs_init(env, jvmti)) {
+        std::fprintf(stderr, "[win.apk] native library support is unavailable for this run\n");
+    }
     // Upstream's own NativeSqlite bridge replaces those stubs (see CMakeLists).
     macapk::sqlite::RegisterNativeSqliteMethods(env);
     check_exception(env, "RegisterNativeSqliteMethods");

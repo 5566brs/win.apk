@@ -144,6 +144,7 @@ std::unique_ptr<ElfImage> ElfImage::map(const std::filesystem::path& path, std::
 
     std::unique_ptr<ElfImage> img(new ElfImage());
     img->path_ = path;
+    img->options_ = options;
     for (int i = 0; i < eh.e_phnum; ++i) {
         Phdr ph;
         std::memcpy(&ph, file.data() + eh.e_phoff + i * sizeof(Phdr), sizeof(ph));
@@ -345,6 +346,12 @@ bool ElfImage::apply_relocations(const SymbolResolver& resolve, std::string* err
         if (st_bind(s.st_info) == kStbWeak) {
             *out = 0;
             return true;
+        }
+        if (options_.unresolved) {
+            if (void* stand_in = options_.unresolved(name)) {
+                *out = reinterpret_cast<uint64_t>(stand_in);
+                return true;
+            }
         }
         if (std::find(missing.begin(), missing.end(), name) == missing.end()) missing.push_back(name);
         *out = 0;
