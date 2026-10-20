@@ -329,6 +329,21 @@ nobody has to find them again.
   a `<merge>` (Vanilla Music, Diary) showed nothing and every `findViewById` in
   its `onCreate` returned null. On Android the window's content frame is the
   parent. Fixed here by merging into a `FrameLayout` (listed in `README.md`).
+- Upstream's `Activity.finish()` ran the whole teardown on the spot, also
+  from inside the activity's own `onCreate`. AOSP only marks the activity and
+  destroys it once `onCreate` has returned. Retro Music finishes in `onCreate`
+  and then goes on inflating fragments, so its `FragmentManager` was already
+  destroyed under it. Fixed here (listed in `README.md`).
+- Upstream's `FragmentInflaterFactory` found the hosting activity on the host
+  stack, which does not hold the first activity yet while its `onCreate` runs.
+  A `FragmentContainerView` with `android:name` in that activity's layout then
+  fell to its two-argument constructor, which throws. It now uses the
+  inflater's own activity, as AOSP does (listed in `README.md`).
+- `AndroidKeyStoreKeyFactorySpi` handed key generation back to
+  `KeyFactory.getInstance(alg)`. When the real provider rejects a spec,
+  `KeyFactory` fails over to the next provider, which ends at AndroidKeyStore
+  again, so a bad spec was a `StackOverflowError` instead of an
+  `InvalidKeySpecException` (Noice). Fixed here (listed in `README.md`).
 - Under Wine, a window needs an X display. `Xvfb :99` plus `xdotool` (clicks,
   keys) and ImageMagick's `import -window root` (screenshots) are enough to
   drive an app from a script.

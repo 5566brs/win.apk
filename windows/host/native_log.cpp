@@ -44,10 +44,19 @@ jlong JNICALL Log_bootTimeNanos(JNIEnv*, jclass) {
     return static_cast<jlong>((t - start) * 100);  // FILETIME ticks are 100 ns
 }
 
+// Upstream raises the calling thread to the interactive QoS class, so that a
+// busy app cannot starve the thread that drives frames and animations. The
+// Windows lever is the thread priority. Called on the thread to boost.
+void JNICALL Log_boostCurrentThreadQos(JNIEnv*, jclass) {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+}
+
 const HostMethod kMethods[] = {
     WINAPK_HOST_NATIVE("com.macapk.loader.NativeLog", "print", "(ILjava/lang/String;Ljava/lang/String;)V",
                        Log_print),
     WINAPK_HOST_NATIVE("com.macapk.loader.NativeLog", "nativeBootTimeNanos", "()J", Log_bootTimeNanos),
+    WINAPK_HOST_NATIVE("com.macapk.loader.NativeLog", "nativeBoostCurrentThreadQos", "()V",
+                       Log_boostCurrentThreadQos),
 };
 
 }  // namespace

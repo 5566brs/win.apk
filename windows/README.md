@@ -128,6 +128,15 @@ Windows hook is unavoidable, and every such change is listed here:
 - `runtime/java/android/view/LayoutInflater.java`: a `<merge>` layout inflated
   without a parent merges into a `FrameLayout` instead of being dropped, so
   `setContentView` of a `<merge>` layout works. Not Windows-specific.
+- `runtime/java/com/macapk/loader/ActivityHost.java`: an activity that calls
+  `finish()` in its own `onCreate` is torn down after `onCreate` returns, as on
+  AOSP, not in the middle of it. Not Windows-specific.
+- `runtime/java/com/macapk/loader/FragmentInflaterFactory.java`: a fragment in
+  a layout is hosted by the activity the inflater belongs to, which also works
+  during the first activity's `onCreate`. Not Windows-specific.
+- `runtime/java/android/security/keystore/AndroidKeyStoreKeyFactorySpi.java`:
+  delegates to the other providers only, instead of recursing into itself
+  until the stack overflows. Not Windows-specific.
 
 ## License
 
