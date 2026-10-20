@@ -113,6 +113,16 @@ guest table is generated from `jni.h`.
 D7. Ship in small pull requests, each one green on a real `windows-latest`
 runner before it is merged. Merge with rebase to keep history linear.
 
+D8. Get x86_64 apps working end to end first (Java-only, then apps with
+x86_64 libraries); ARM support (M10) comes after that. To keep that door open
+without building anything for it now, guest code enters the system in exactly
+three places: the loader (`ElfImage`, which refuses arm64 libraries with a
+clear message), the linker's image registry (`GuestLinker`) and native-method
+binding (`jni_bind`). An ARM backend would plug in there and nowhere else, so
+new code must not call guest functions or inspect guest images around them.
+An APK that ships only ARM libraries has to be reported as such to the user,
+not fail somewhere later.
+
 ## 4. Current state
 
 Everything in this section is merged on `main` and tested in CI on
@@ -133,6 +143,10 @@ Everything in this section is merged on `main` and tested in CI on
 | `src/guest_jni.cpp` | Guest `JNIEnv` and `JavaVM`: one shared System V table that forwards into HotSpot, a guest env per thread, and `GetEnv`, `AttachCurrentThread` and `DetachCurrentThread` |
 | `src/jni_variadic.cpp` | The `Call<T>Method`, `Call<T>MethodV` and `NewObject` families. Reads the argument stream against the method signature and calls HotSpot's `Call<T>MethodA` form |
 | `src/jni_bind.cpp` | Binds guest natives into HotSpot: the guest `RegisterNatives` slot wraps each function in a thunk, and a JVMTI `NativeMethodBind` hook swaps guest addresses for thunks. Thunks are cached per function and signature. Also the cached JVMTI signature provider |
+| `host/runtime_main.cpp` | `winapk-runtime`, the host that runs an APK: converts its DEX with upstream's converter (cached), creates the JVM in-process with upstream's options, binds the host natives and calls `Boot.run` |
+| `host/host_natives.cpp` | Binds every native method of upstream's 39 host classes: the Windows implementation where there is one, otherwise a stub that returns zero and logs its name on first call |
+| `host/native_log.cpp`, `host/native_cocoa.cpp` | `NativeLog`, and a headless `NativeCocoa`: fixed screen metrics, a 60 Hz render tick driving the app's renderer, frames optionally written to a BMP |
+| `scripts/build_java.sh`, `scripts/build_framework_res.sh`, `scripts/stage_runtime.sh` | Build upstream's Java runtime with a stock JDK, the platform resource APK with upstream's script and Google's `aapt2`, and stage `bin/` and `lib/` into a runnable folder |
 | `tools/elfrun_main.cpp` | `winapk-elfrun`, the loader and ABI test runner |
 | `tools/jvmrun_main.cpp` | `winapk-jvm-run`, the real-JVM end-to-end test |
 
@@ -141,18 +155,20 @@ Everything in this section is merged on `main` and tested in CI on
 | Binary | What it shows |
 |---|---|
 | `winapk-elfrun` | Two builds of an Android test library (plain RELA, and APS2 plus RELR) load and run: int, double and stack-passed arguments; RELATIVE and `R_X86_64_64` relocations; constructors; shim calls; stack-protected code on the main thread and on new threads; a guest comparator called from host `qsort`; a host callback called from guest code; and the `gs:[0x28]` alias |
-| `winapk-thunk-test` | The native-method thunk handles mixed, stack-overflowing and narrow arguments and swaps the env; the variadic entry stub builds a correct `va_list` |
+| `winapk-thunk-test` | The native-method thunk handles mixed, stack-overflowing and narrow arguments and swaps the env; the variadic entry stub builds a correct `va_list`; the tagged stub returns zero for any return type |
 | `winapk-jni-test` | The guest `JNIEnv` forwards correctly against a mock JVM, for several return types and argument shapes, and `JavaVM::GetEnv` hands back a guest env |
 | `winapk-jni-variadic-test` | The variadic bridge works for all four call kinds (virtual, static, nonvirtual, `NewObject`), for int, long, object, float and double arguments, through both `...` and `va_list` |
 | `winapk-linker-test` | A four-library tree (root, a `DT_NEEDED` cycle between two libraries, and a plugin opened at runtime) loads through the linker: constructors run dependencies first, symbols resolve across the cycle, `dlsym` on a library finds its dependencies' symbols, the registry tells guest from host addresses, and the guest's `dlopen`, `dlsym`, `dlerror` and `dladdr` behave like bionic's |
 | `winapk-jvm-run` | With a real HotSpot JVM: a library loaded through the linker runs its `JNI_OnLoad`, which registers `nativeMix` through the guest `RegisterNatives`; `nativeAdd` is handed to HotSpot as a raw guest address and the `NativeMethodBind` hook has to replace it. Both are called from Java, and `nativeAdd` calls back into Java through a variadic `CallStaticIntMethod`. `nativeAdd(3, 4)` must return 19 |
+| Headless boot (CI) | `winapk-runtime` boots the F-Droid Sudoku APK on `windows-latest`: DEX conversion, `Application.onCreate`, the first activity resumed, and 30 frames presented. The log and the last frame are a CI artifact |
 
 ### Not there yet
 
-There is no app launch, no window, no graphics or audio, and the libc shim
-covers about twenty functions plus libdl. HotSpot cannot yet find a guest
-library through `System.loadLibrary` (see the stub DLL note in section 6). The pieces above are the foundation that the
-roadmap in section 8 builds on.
+A Java-only app boots and draws, but there is no window yet: frames only go
+to a file. Input, audio, SQLite and most other host natives are stubs. The
+libc shim covers about twenty functions plus libdl, and HotSpot cannot yet
+find a guest library through `System.loadLibrary` (see the stub DLL note in
+section 6).
 
 ## 5. Technical findings
 
@@ -245,7 +261,45 @@ nobody has to find them again.
   `RegisterNatives` all work. Wine prints harmless
   `Attempt to get process group affinity failed` warnings.
 - `winapk-jvm-run` loads `jvm.dll` from `PATH`. CI puts `$JAVA_HOME/bin/server`
-  and `$JAVA_HOME/bin` in front.
+  and `$JAVA_HOME/bin` in front. `winapk-runtime` instead calls
+  `SetDllDirectory` on the JDK's `bin` (jvm.dll needs the VC runtime there)
+  and loads `bin\server\jvm.dll` by full path.
+- HotSpot reads JVM option strings in the ANSI code page, so a classpath under
+  a user name in, say, Hebrew would break. The host passes such paths in their
+  8.3 short form, which is ASCII.
+- Under Wine 9, `java.net.NetworkInterface.getAll` dies with `0xc06d007f` (a
+  delay-loaded function Wine lacks). The JDK's default `SecureRandom` seeds
+  itself through it, so the first `Files.createTempFile` kills the JVM. Real
+  Windows is fine. `test/run_app_wine.sh` puts the SunMSCAPI provider first,
+  which avoids the path.
+
+### Upstream's Java runtime on Windows
+
+- `runtime/java` (3,000 files) compiles unchanged with a stock JDK 21 on Linux
+  and Windows in under 30 seconds. The DEX converter (`com.macapk.dex.Main`)
+  also runs unchanged: the Sudoku APK converts 7,723 classes in about 5 s.
+- `Boot.run` reaches `Activity.onResume` with almost every host native
+  stubbed. What it really needs from the host before that: `NativeLog.print`,
+  `NativeCocoa.init` returning true, the phone size, and a renderer tick for
+  anything to be drawn.
+- The renderer contract (`cocoa_bridge.mm`): once a window registers a
+  `MetalSurfaceCallbacks` with `setRenderer`, the host calls
+  `macapkSurfaceChanged(w, h)` once with the size in pixels (phone points
+  times `DisplayMetrics.macapkDeviceDensity()`), then `macapkDrawFrame()` every
+  vsync. Frames come back through `presentFrame` (the default) or
+  `presentBitmap`.
+- The platform resource APK is required: without it every `@android:`
+  reference fails. Upstream's `scripts/build_framework_res.sh` builds it on
+  Linux and Windows unchanged given `aapt2` 9.x; 8.x rejects
+  `--feature-flags`. Without apktool's table as a reference, internal
+  resource ids are assigned by `aapt2` rather than matching upstream's.
+- The runtime finds jars and the resource APK relative to each other
+  (`<lib>/../bin/tools/framework-res.apk`), and the Android file system under
+  the `macapk.android.root` property, which the host points at
+  `%LOCALAPPDATA%\Win.apk\android`.
+- Upstream gap, not Windows-specific: `Resources.getIntArray` on an
+  `<array>` whose items are color references returns an empty array (the
+  Sudoku tutorial's dot colors). Worth reporting upstream.
 
 ### GitHub
 
@@ -410,6 +464,11 @@ criterion. The durations are rough estimates for one experienced developer and
 will move as the work reveals more.
 
 ### M1. Windows host runtime (2 to 4 weeks)
+
+Status: the exit criterion is met in CI (the Sudoku APK boots headless and
+draws). Left over: the host-platform interface for the macOS tool calls in the
+Java code (they fail harmlessly for now), and real `NativeOs` and
+`NativeLooper` implementations, which move to M3 with the other services.
 
 - Port `runtime/src/main.cpp` and `jvm_loader.cpp` into a Windows host
   executable that loads `jvm.dll`, creates the VM with upstream's options
@@ -577,6 +636,9 @@ You also need a Windows JDK (for example the Temurin 21 zip) for `jvm.dll`,
   `winapk-jni-variadic-test.exe` under Wine.
 - Real-JVM test:
   `WINAPK_WIN_JDK=<windows-jdk> windows/test/run_e2e_wine.sh`
+- Boot an APK headless:
+  `WINAPK_WIN_JDK=<windows-jdk> windows/test/run_app_wine.sh app.apk`
+  (also needs `curl` and `unzip` for the first resource build)
 
 ### Local setup on Windows
 
@@ -588,8 +650,9 @@ Build with CMake as described in `windows/README.md`.
 
 `.github/workflows/windows-poc.yml` has two jobs. The Ubuntu job builds the
 guest test libraries and the end-to-end inputs. The Windows job builds
-everything with MSYS2 CLANG64 and Temurin 21 and runs every test on
-`windows-latest`.
+everything with MSYS2 CLANG64 and Temurin 21, runs every test on
+`windows-latest`, then stages the runtime and boots an APK headless. The
+platform resource APK is cached between runs.
 
 ### Pull requests
 

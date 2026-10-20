@@ -34,6 +34,8 @@ fall into three groups:
 | `include/winapk/jni_variadic.h`, `src/jni_variadic.cpp` | The variadic `Call<T>Method` / `...V` / `NewObject` bridge (31 families, one template keyed on the `...A` slot): reads the argument stream against the method signature and repacks it into the `jvalue[]` of HotSpot's A-form. Needs a `SignatureProvider` (JVMTI-backed in the real host, a map in tests) |
 | `include/winapk/linker.h`, `src/linker.cpp` | The guest linker: loads a library with its `DT_NEEDED` tree (bionic's lookup order, system libraries answered by the shim), keeps the registry of loaded images, and implements the guest's `dlopen`, `dlsym`, `dladdr`, `dlerror` and `dlclose`. `test/linker_test.cpp` (`winapk-linker-test`) checks it against `test/guest/link_guest.c` |
 | `include/winapk/jni_bind.h`, `src/jni_bind.cpp` | Binding guest natives into HotSpot: the guest `RegisterNatives` slot wraps each function in a thunk, and a JVMTI `NativeMethodBind` hook does the same for natives bound by name. Also the cached JVMTI signature provider |
+| `host/` | `winapk-runtime.exe`, the host that runs an APK (milestone M1): DEX conversion, the in-process JVM, the host natives (most still stubs; `NativeCocoa` is headless) and `Boot.run` |
+| `scripts/` | `build_java.sh` (upstream's Java runtime with a stock JDK), `build_framework_res.sh` (the platform resource APK) and `stage_runtime.sh` (a runnable `bin/` + `lib/` folder) |
 | `tools/jvmrun_main.cpp` | `winapk-jvm-run`: the real-JVM end-to-end test. Creates a HotSpot JVM, loads an Android x86_64 `.so` through the guest linker, runs its `JNI_OnLoad` (which registers a native itself), binds a second native through the `NativeMethodBind` hook, and calls both from Java; one of them calls back into Java through the guest `JNIEnv`. `test/guest/jni_guest.c` and `test/java/WinApkJniTest.java` are its inputs; `test/build_e2e.sh` builds them and `test/run_e2e_wine.sh` runs it under Wine |
 
 What the PoC checks: int/double/stack arguments across the ABI boundary, RELATIVE,
@@ -67,6 +69,18 @@ tests on a real `windows-latest` runner.
 
 Toolchain: clang only. MSVC cannot emit System V calls, and mingw GCC 13 emits
 broken SEH unwind data for `sysv_abi` functions.
+
+## Running an APK (headless for now)
+
+```sh
+windows/scripts/stage_runtime.sh build runtime     # after building with CMake
+runtime/bin/winapk-runtime.exe --apk app.apk --jdk "$JAVA_HOME"
+```
+
+There is no window yet (milestone M2). Set `WINAPK_HEADLESS_FRAME=frame.bmp` to
+see the last frame the app drew, and `WINAPK_HEADLESS_EXIT_AFTER_FRAMES=30` to
+stop after a number of frames. App data goes to `%LOCALAPPDATA%\Win.apk`. On
+Linux, `windows/test/run_app_wine.sh` does all of this under Wine.
 
 ## Status and next steps
 
