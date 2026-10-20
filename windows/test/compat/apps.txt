@@ -1,0 +1,30 @@
+# The compatibility sweep's app corpus: open-source apps from F-Droid that
+# ship no native libraries, pinned to one version each so results compare
+# across runs. One "package versionCode" per line; the APK is fetched from
+# https://f-droid.org/repo/<package>_<versionCode>.apk (or /archive/ once
+# F-Droid retires the version).
+#
+# Selected 2026-10-20 from 44 candidates; the other 22 ship native code
+# (all of them with an x86_64 build) and wait for the native-library work.
+com.github.muellerma.coffee 47
+org.secuso.privacyfriendlysudoku 101
+org.secuso.privacyfriendlynotes 105
+org.secuso.privacyfriendlytodolist 103
+org.secuso.privacyfriendlydicer 101
+org.secuso.privacyfriendly2048 100
+org.secuso.privacyfriendlymemory 100
+org.secuso.privacyfriendlytapemeasure 100
+org.secuso.privacyfriendlyactivitytracker 100
+net.gsantner.markor 163
+org.billthefarmer.editor 198
+org.billthefarmer.diary 1105
+org.billthefarmer.currency 158
+io.github.muntashirakon.Music 10603
+com.github.ashutoshgngwr.noice 72
+de.dennisguse.opentracks 6766
+org.isoron.uhabits 20301
+org.dmfs.tasks 82200
+de.reimardoeffinger.quickdic 134
+ch.blinkenlights.android.vanilla 13200
+com.vonglasow.michael.satstat 30600
+org.ligi.passandroid 373

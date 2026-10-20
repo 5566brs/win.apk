@@ -1,0 +1,73 @@
+# Win.apk compatibility sweep: boots every app in windows/test/compat/apps.txt
+# headless on a real Windows runner and ranks what blocks them by the number
+# of apps affected (windows/test/compat/sweep.py). The ranked report is the
+# run's summary page; logs and last frames are an artifact.
+name: Compatibility sweep
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * 1'   # Mondays
+  push:
+    branches: [main]
+    paths:
+      - 'windows/**'
+      - 'runtime/java/**'
+      - '.github/workflows/compat-sweep.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  sweep:
+    name: Boot the app corpus
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          install: unzip zip
+          pacboy: >-
+            clang:p
+            cmake:p
+            ninja:p
+      - uses: actions/cache@v4
+        with:
+          path: thirdparty/framework-res
+          key: framework-res-v2-${{ hashFiles('scripts/build_framework_res.sh', 'windows/scripts/build_framework_res.sh') }}
+      - uses: actions/cache@v4
+        with:
+          path: apk-cache
+          key: compat-apks-${{ hashFiles('windows/test/compat/apps.txt') }}
+      - name: Build and stage the runtime
+        run: |
+          cmake -S windows -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++ \
+            -DWINAPK_JNI_INCLUDE="$(cygpath -u "$JAVA_HOME")/include"
+          cmake --build build --target winapk-runtime
+          export JAVA_HOME="$(cygpath -u "$JAVA_HOME")"
+          windows/scripts/stage_runtime.sh build runtime
+      - name: Run the sweep
+        shell: pwsh
+        run: |
+          python windows/test/compat/sweep.py --runtime runtime --jdk "$env:JAVA_HOME" `
+            --apks apk-cache --out sweep --frames 60 --timeout 180
+          Get-Content sweep/report.md | Add-Content $env:GITHUB_STEP_SUMMARY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: compat-sweep
+          path: |
+            sweep/report.md
+            sweep/report.json
+            sweep/logs/
+            sweep/frames/

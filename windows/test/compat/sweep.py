@@ -1,0 +1,251 @@
+#!/usr/bin/env python3
+"""Compatibility sweep: boot every app of the corpus headless and report what
+blocks them, ranked by how many apps each problem affects.
+
+    sweep.py --runtime <staged runtime dir> --out <report dir>
+             [--jdk <dir>] [--apps apps.txt] [--apks <cache dir>]
+             [--frames 60] [--timeout 180] [--launcher wine] [--only pkg,...]
+
+For each app it runs winapk-runtime with WINAPK_HEADLESS=1 and a fresh data
+directory, waits for --frames presented frames (or the timeout), and keeps the
+log and the last frame. Each run gets one status:
+
+    drew      presented the frames, and the last frame has real content
+    blank     presented the frames, but the last frame is one or two colors
+    no-frame  ran until the timeout without presenting the frames
+    crashed   the process ended on its own before that (exit code != 0)
+
+It then collects, per app, the host natives that were called while still
+stubbed, the exceptions Java logged, and a HotSpot crash file if there was
+one, and writes report.json and report.md with the problems sorted by the
+number of apps they appear in. That ranking is what decides what to fix next:
+a fix to the framework or the host helps every app the problem shows up in.
+
+Paths given to the runtime are made Windows paths with `winepath -w` when
+--launcher is wine. MACAPK_JVM_OPTS from the environment is passed through
+(run_app_wine.sh explains the one Wine needs).
+"""
+
+import argparse
+import collections
+import json
+import os
+import re
+import shutil
+import struct
+import subprocess
+import sys
+import time
+import urllib.request
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+STUB_RE = re.compile(r"native not implemented on Windows yet, returning 0: (\S+)")
+# "[W] Mac.apk.ActivityHost: onCreate threw java.lang.Foo: msg -- continuing"
+THREW_RE = re.compile(r"threw ([\w.$]+(?:Exception|Error))(?::\s*(.*?))?(?: -- continuing)?$")
+# A bare stack-trace head: "java.lang.IllegalStateException: msg"
+TRACE_RE = re.compile(r"^([a-z][\w.]*\.[A-Z][\w$]*(?:Exception|Error))(?::\s*(.*))?$")
+FRAMES_RE = re.compile(r"\[win\.apk\] (\d+) frames presented")
+
+
+def read_apps(path, only):
+    apps = []
+    for line in open(path, encoding="utf-8"):
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        pkg, version = line.split()
+        if only and pkg not in only:
+            continue
+        apps.append((pkg, version))
+    return apps
+
+
+def fetch(pkg, version, cache):
+    os.makedirs(cache, exist_ok=True)
+    path = os.path.join(cache, f"{pkg}_{version}.apk")
+    if os.path.exists(path):
+        return path
+    for base in ("repo", "archive"):
+        try:
+            tmp = path + ".part"
+            urllib.request.urlretrieve(f"https://f-droid.org/{base}/{pkg}_{version}.apk", tmp)
+            os.replace(tmp, path)
+            return path
+        except Exception:
+            continue
+    return None
+
+
+def win_path(path, launcher):
+    path = os.path.abspath(path)
+    if launcher and os.path.basename(launcher).startswith("wine"):
+        out = subprocess.run([launcher, "winepath", "-w", path], capture_output=True, text=True)
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
+    return path
+
+
+def bmp_colors(path, limit=16):
+    """Distinct colors among a grid of samples of a 32-bit BMP, capped at limit."""
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+        offset = struct.unpack_from("<I", data, 10)[0]
+        width, height = struct.unpack_from("<ii", data, 18)
+        height = abs(height)
+        colors = set()
+        for y in range(0, height, max(1, height // 64)):
+            for x in range(0, width, max(1, width // 36)):
+                i = offset + (y * width + x) * 4
+                colors.add(data[i:i + 3])
+                if len(colors) >= limit:
+                    return len(colors)
+        return len(colors)
+    except Exception:
+        return 0
+
+
+def run_app(pkg, apk, args, out):
+    log_path = os.path.join(out, "logs", f"{pkg}.log")
+    frame_path = os.path.join(out, "frames", f"{pkg}.bmp")
+    data_dir = os.path.join(out, "data", pkg)
+    shutil.rmtree(data_dir, ignore_errors=True)
+    os.makedirs(data_dir, exist_ok=True)
+    exe = os.path.join(args.runtime, "bin", "winapk-runtime.exe")
+    cmd = ([args.launcher] if args.launcher else []) + [
+        exe, "--apk", win_path(apk, args.launcher), "--data", win_path(data_dir, args.launcher)]
+    if args.jdk:
+        cmd += ["--jdk", win_path(args.jdk, args.launcher)]
+    env = dict(os.environ)
+    env["WINAPK_HEADLESS"] = "1"
+    env["WINAPK_HEADLESS_EXIT_AFTER_FRAMES"] = str(args.frames)
+    env["WINAPK_HEADLESS_FRAME"] = win_path(frame_path, args.launcher)
+    env.setdefault("WINEDEBUG", "-all")
+    start = time.time()
+    with open(log_path, "w", encoding="utf-8", errors="replace") as log:
+        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env)
+        try:
+            code = proc.wait(timeout=args.timeout)
+            timed_out = False
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            code = None
+            timed_out = True
+    if args.launcher and os.path.basename(args.launcher).startswith("wine"):
+        # A killed wine leaves the JVM behind in the wineserver.
+        subprocess.run(["wineserver", "-k"], capture_output=True)
+    seconds = round(time.time() - start, 1)
+    text = open(log_path, encoding="utf-8", errors="replace").read()
+    return analyze(pkg, text, code, timed_out, seconds, frame_path, out)
+
+
+def analyze(pkg, text, code, timed_out, seconds, frame_path, out):
+    stubs = sorted(set(STUB_RE.findall(text)))
+    exceptions = collections.OrderedDict()
+    for line in text.splitlines():
+        line = line.strip()
+        m = THREW_RE.search(line) or TRACE_RE.match(line)
+        if m:
+            name, msg = m.group(1), (m.group(2) or "").strip()
+            exceptions.setdefault(name, msg[:200])
+    frames = max([int(n) for n in FRAMES_RE.findall(text)] or [0])
+    first_frame = "first frame presented" in text
+    hs_err = "A fatal error has been detected by the Java Runtime Environment" in text
+    if frames > 0 and code == 0:
+        colors = bmp_colors(frame_path)
+        status = "drew" if colors > 2 else "blank"
+    elif timed_out:
+        status = "no-frame"
+        colors = bmp_colors(frame_path) if first_frame else 0
+    else:
+        status = "crashed"
+        colors = 0
+    return {
+        "package": pkg,
+        "status": status,
+        "exit_code": code,
+        "seconds": seconds,
+        "first_frame": first_frame,
+        "frame_colors": colors,
+        "jvm_crash": hs_err,
+        "stubbed_natives": stubs,
+        "exceptions": exceptions,
+    }
+
+
+def rank(results, key):
+    counter = collections.Counter()
+    sample = {}
+    for r in results:
+        items = r[key]
+        names = items.keys() if isinstance(items, dict) else items
+        for name in names:
+            counter[name] += 1
+            if isinstance(items, dict) and name not in sample:
+                sample[name] = (r["package"], items[name])
+    return counter, sample
+
+
+def write_report(results, out):
+    with open(os.path.join(out, "report.json"), "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2)
+    by_status = collections.Counter(r["status"] for r in results)
+    lines = ["# Win.apk compatibility sweep", ""]
+    lines.append(f"{len(results)} apps: " + ", ".join(
+        f"{by_status[s]} {s}" for s in ("drew", "blank", "no-frame", "crashed") if by_status[s]))
+    lines += ["", "| App | Status | Seconds | Stubbed natives | Exceptions |", "|---|---|---|---|---|"]
+    for r in sorted(results, key=lambda r: (r["status"], r["package"])):
+        lines.append(f"| {r['package']} | {r['status']}{' (JVM crash)' if r['jvm_crash'] else ''} | "
+                     f"{r['seconds']} | {len(r['stubbed_natives'])} | {len(r['exceptions'])} |")
+    stubs, _ = rank(results, "stubbed_natives")
+    lines += ["", "## Stubbed natives, by number of apps that called them", "",
+              "| Apps | Native |", "|---|---|"]
+    lines += [f"| {n} | `{name}` |" for name, n in stubs.most_common()]
+    exc, sample = rank(results, "exceptions")
+    lines += ["", "## Exceptions, by number of apps", "", "| Apps | Exception | First seen in |", "|---|---|---|"]
+    for name, n in exc.most_common():
+        pkg, msg = sample[name]
+        detail = f"{pkg}: {msg}" if msg else pkg
+        lines.append(f"| {n} | `{name}` | {detail.replace('|', '/')} |")
+    with open(os.path.join(out, "report.md"), "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    return "\n".join(lines)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--runtime", required=True)
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--jdk")
+    ap.add_argument("--apps", default=os.path.join(HERE, "apps.txt"))
+    ap.add_argument("--apks", default=None, help="APK cache (default: <out>/apks)")
+    ap.add_argument("--frames", type=int, default=60)
+    ap.add_argument("--timeout", type=int, default=180)
+    ap.add_argument("--launcher", default=None)
+    ap.add_argument("--only", default="")
+    args = ap.parse_args()
+
+    out = os.path.abspath(args.out)
+    for sub in ("logs", "frames", "data"):
+        os.makedirs(os.path.join(out, sub), exist_ok=True)
+    cache = args.apks or os.path.join(out, "apks")
+    only = set(filter(None, args.only.split(",")))
+    results = []
+    for pkg, version in read_apps(args.apps, only):
+        apk = fetch(pkg, version, cache)
+        if not apk:
+            print(f"[sweep] {pkg}: download failed", flush=True)
+            continue
+        r = run_app(pkg, apk, args, out)
+        print(f"[sweep] {pkg}: {r['status']} in {r['seconds']} s, {len(r['stubbed_natives'])} stubbed natives, "
+              f"{len(r['exceptions'])} exceptions", flush=True)
+        results.append(r)
+        shutil.rmtree(os.path.join(out, "data", pkg), ignore_errors=True)
+    print(write_report(results, out))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
