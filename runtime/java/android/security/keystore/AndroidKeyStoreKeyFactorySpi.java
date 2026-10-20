@@ -152,7 +152,7 @@ public class AndroidKeyStoreKeyFactorySpi extends java.security.KeyFactorySpi {
     }
 
     /** Hands key generation to the other providers of this algorithm, in
-     *  priority order, never to AndroidKeyStore itself. A plain
+     *  priority order, never back to this class. A plain
      *  KeyFactory.getInstance(mAlgorithm) is not enough: when the first
      *  provider rejects the spec, KeyFactory fails over to the next one, which
      *  ends at AndroidKeyStore (registered last), which asked getInstance
@@ -165,7 +165,12 @@ public class AndroidKeyStoreKeyFactorySpi extends java.security.KeyFactorySpi {
             java.security.Security.getProviders("KeyFactory." + mAlgorithm);
         if (providers != null) {
             for (java.security.Provider p : providers) {
-                if (p instanceof AndroidKeyStoreProvider) continue;
+                // Skip by implementation, not by provider class: any provider
+                // whose service is this class (AndroidKeyStore under another
+                // name or registration) leads straight back here.
+                java.security.Provider.Service svc = p.getService("KeyFactory", mAlgorithm);
+                if (svc == null || svc.getClassName().startsWith(
+                        AndroidKeyStoreKeyFactorySpi.class.getName())) continue;
                 try {
                     java.security.KeyFactory kf = java.security.KeyFactory.getInstance(mAlgorithm, p);
                     return pub ? kf.generatePublic(spec) : kf.generatePrivate(spec);
