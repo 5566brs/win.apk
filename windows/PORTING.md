@@ -146,6 +146,7 @@ Everything in this section is merged on `main` and tested in CI on
 | `host/runtime_main.cpp` | `winapk-runtime`, the host that runs an APK: converts its DEX with upstream's converter (cached), creates the JVM in-process with upstream's options, binds the host natives and calls `Boot.run` |
 | `host/host_natives.cpp` | Binds every native method of upstream's 39 host classes: the Windows implementation where there is one, otherwise a stub that returns zero and logs its name on first call |
 | `host/native_log.cpp`, `host/native_cocoa.cpp` | `NativeLog`, and `NativeCocoa`: screen metrics, a 60 Hz render tick driving the app's renderer, presents, input delivery to `TouchDispatcher`, and headless mode (frames optionally written to a BMP) |
+| `compat/CoreFoundation/CoreFoundation.h`, upstream `runtime/src/native_sqlite.cpp` | SQLite for apps: upstream's `NativeSqlite` bridge compiled unchanged, with the few CoreFoundation string calls it makes implemented on Win32. SQLite is the official amalgamation, downloaded and hash-checked at configure time |
 | `host/win32_window.cpp` | The app's Win32 window on its own UI thread: frames painted with GDI and scaled to the per-monitor-DPI client area; mouse to `MotionEvent`, wheel to a short drag, keyboard to `KeyEvent` (Escape is BACK); minimize and restore for `moveTaskToBack`/`Front` |
 | `scripts/build_java.sh`, `scripts/build_framework_res.sh`, `scripts/stage_runtime.sh` | Build upstream's Java runtime with a stock JDK, the platform resource APK with upstream's script and Google's `aapt2`, and stage `bin/` and `lib/` into a runnable folder |
 | `tools/elfrun_main.cpp` | `winapk-elfrun`, the loader and ABI test runner |
@@ -167,8 +168,8 @@ Everything in this section is merged on `main` and tested in CI on
 
 A Java-only app runs in a window and takes mouse and keyboard input, but it is
 drawn in software and scaled with GDI: there is no OpenGL (ANGLE) yet, so
-`GLSurfaceView` apps and games do not render. Audio, SQLite and most other
-host natives are stubs. The
+`GLSurfaceView` apps and games do not render. SQLite works. Audio and most
+other host natives are stubs. The
 libc shim covers about twenty functions plus libdl, and HotSpot cannot yet
 find a guest library through `System.loadLibrary` (see the stub DLL note in
 section 6).
@@ -308,6 +309,13 @@ nobody has to find them again.
   scroll a `RecyclerView` here: the first move past the touch slop only makes
   the view take the gesture over, and only later moves scroll. The wheel drag
   therefore steps just past the slop first.
+- Upstream's `ViewPropertyAnimator` only ran on an explicit `start()`, while
+  Android starts it on the next frame by itself. Fixed here (listed in
+  `README.md`): a fade-in written as `view.animate().alpha(1f)` left a whole
+  screen invisible.
+- Upstream gap still open: `RatingBar` draws as a grid of stars filling its
+  whole box instead of one row of `numStars` (Privacy Friendly Sudoku's
+  difficulty bar), which also pushes the content below it out of view.
 - Under Wine, a window needs an X display. `Xvfb :99` plus `xdotool` (clicks,
   keys) and ImageMagick's `import -window root` (screenshots) are enough to
   drive an app from a script.
@@ -523,6 +531,8 @@ Exit: Java-only apps from the compatibility list draw and respond to input
 (for example a calculator, a sudoku game and the F-Droid client).
 
 ### M3. Audio, storage and basic services (3 to 5 weeks)
+
+Status: SQLite is done (`NativeSqlite`).
 
 - `NativeAudio` (40 natives) on WASAPI, `NativeSqlite`, `NativeOs`, clipboard,
   the document picker (`IFileOpenDialog`), and the basic parts of
