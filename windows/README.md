@@ -17,26 +17,26 @@ fall into three groups:
 | Ship `lib/x86_64/*.so` | Load the x86_64 libraries natively with the loader in this directory. Full speed. |
 | ARM-only native code | Needs dynamic binary translation (dynarmic, 0BSD). This is a research track and comes last. |
 
-## What is here (phase 1: loader proof of concept)
+## What is here
 
 | Path | What it is |
 |---|---|
 | `include/winapk/elf64_defs.h` | ELF64 / x86-64 psABI layouts (Windows has no `<elf.h>`) |
-| `include/winapk/guest_abi.h` | `WINAPK_GUEST_ABI`: the System V ↔ Microsoft x64 call boundary |
+| `include/winapk/guest_abi.h` | `WINAPK_GUEST_ABI`: the boundary between System V and Microsoft x64 calls |
 | `src/elf_loader.cpp` | Android x86_64 ELF loader: segments, RELA/RELR/APS2 relocations, protections, RELRO, init/fini |
-| `src/fs_tls_patch.cpp` | Bionic stack guard `%fs:0x28` → `%gs:0x28` (`NT_TIB.ArbitraryUserPointer`) |
+| `src/fs_tls_patch.cpp` | Rewrites the Bionic stack guard `%fs:0x28` to `%gs:0x28` (`NT_TIB.ArbitraryUserPointer`) |
 | `src/mini_bionic.cpp` | First slice of the Windows Bionic shim (sysv_abi wrappers over the UCRT) |
 | `tools/elfrun_main.cpp` | `winapk-elfrun`: loads `.so` files and runs the PoC checks |
 | `test/guest/poc_guest.c` | The Android x86_64 test library |
-| `include/winapk/abi_thunk.h`, `src/abi_thunk.cpp` | Runtime machine-code thunks for the JNI bridge: Microsoft→System V native-method thunks (per Java descriptor) and the System V variadic `va_list` entry stub (phase 2 groundwork) |
+| `include/winapk/abi_thunk.h`, `src/abi_thunk.cpp` | Runtime machine-code thunks for the JNI bridge: native-method thunks from Microsoft x64 callers to System V code (built per Java signature) and the System V variadic `va_list` entry stub |
 | `tools/gen_jni_slots.py`, `src/jni_slots.inc` | Generated `JNINativeInterface_` slot table (235 slots) the guest `JNIEnv` wrapper is built from |
 | `include/winapk/guest_jni.h`, `src/guest_jni.cpp` | The guest `JNIEnv`/`JavaVM` wrapper: per-thread guest env, a generic System V forwarder into HotSpot's table for every non-variadic slot, and `GetEnv`/`Attach`/`Detach`. Needs a JDK's `jni.h` at build time (`-DWINAPK_JNI_INCLUDE=$JAVA_HOME/include`) |
 | `include/winapk/jni_variadic.h`, `src/jni_variadic.cpp` | The variadic `Call<T>Method` / `...V` / `NewObject` bridge (31 families, one template keyed on the `...A` slot): reads the argument stream against the method signature and repacks it into the `jvalue[]` of HotSpot's A-form. Needs a `SignatureProvider` (JVMTI-backed in the real host, a map in tests) |
-| `tools/jvmrun_main.cpp` | `winapk-jvm-run`: the real-JVM end-to-end test. Creates a HotSpot JVM, loads an Android x86_64 `.so`, binds its native method through the host→guest thunk, and calls it from Java; the native calls back into Java through the guest `JNIEnv`. `test/guest/jni_guest.c` + `test/java/WinApkJniTest.java` are its inputs; `test/build_e2e.sh` builds them and `test/run_e2e_wine.sh` runs it under Wine |
+| `tools/jvmrun_main.cpp` | `winapk-jvm-run`: the real-JVM end-to-end test. Creates a HotSpot JVM, loads an Android x86_64 `.so`, binds its native method through a host-to-guest thunk, and calls it from Java; the native calls back into Java through the guest `JNIEnv`. `test/guest/jni_guest.c` and `test/java/WinApkJniTest.java` are its inputs; `test/build_e2e.sh` builds them and `test/run_e2e_wine.sh` runs it under Wine |
 
 What the PoC checks: int/double/stack arguments across the ABI boundary, RELATIVE,
 `R_X86_64_64`, GLOB_DAT/JUMP_SLOT, RELR and Android APS2 relocations, `DT_INIT_ARRAY`,
-guest → host shim calls, host → guest callbacks, and stack-protected guest code
+calls from guest code into the shim, host callbacks into guest code, and stack-protected guest code
 on the main thread and on new threads.
 
 ## Build and run
@@ -54,49 +54,22 @@ The guest libraries are built with plain clang + lld, so no NDK is needed:
 
 On Linux (cross-compile, run under Wine): `windows/test/run_poc_wine.sh`.
 
-CI: `.github/workflows/windows-poc.yml` builds the guests on Ubuntu and runs the
-checks on a real `windows-latest` runner.
+The JNI library and its tests (`winapk-jni-test`, `winapk-jni-variadic-test`,
+`winapk-jvm-run`) build only when CMake is given a JDK's include directory:
+`-DWINAPK_JNI_INCLUDE=$JAVA_HOME/include`.
+The real-JVM test runs under Wine with `windows/test/run_e2e_wine.sh`; see
+`PORTING.md`, section 9, for the full local setup.
+
+CI: `.github/workflows/windows-poc.yml` builds the guests on Ubuntu and runs all
+tests on a real `windows-latest` runner.
 
 Toolchain: clang only. MSVC cannot emit System V calls, and mingw GCC 13 emits
 broken SEH unwind data for `sysv_abi` functions.
 
-## Known limits of the PoC (on purpose, for now)
+## Status and next steps
 
-- **Variadic libc calls** (`printf`, `__android_log_print`): the System V and
-  Windows `va_list` layouts differ, so these still need dedicated shim bridges.
-  (The variadic JNI `Call*Method` families are done — see `jni_variadic.cpp`.)
-- **ELF TLS** (`PT_TLS`, TLS relocations) and `%fs:0` (`__get_tls`): refused with
-  a clear error. They need a decoder-driven rewrite (Zydis) instead of the 9-byte
-  pattern match used for the stack guard.
-- **`DT_NEEDED`** is reported, not followed. A global symbol scope across guest
-  libraries comes next.
-- **Signals**: none yet. Mapping Windows exceptions (VEH) to Android
-  `ucontext_t` also has to account for the System V red zone, which Windows does
-  not preserve when it delivers an exception.
-- **Guest thread stacks**: Android code does not probe the stack, so guest
-  threads will need fully committed stacks.
-
-## Roadmap
-
-- [x] **Phase 0**: repository, CI on a real Windows runner, upstream kept intact
-- [x] **Phase 1**: Android x86_64 ELF loader proof of concept, verified on Windows CI
-- [x] **JNI bridge core**: the System V `JNIEnv`/`JavaVM` wrapper, the variadic
-      `Call*Method` families, host→guest native-method thunks, and a real-JVM
-      end-to-end test (load an Android x86_64 `.so`, bind its native, call it
-      from Java, call back into Java) — all green on Windows CI
-- [ ] **Phase 2**: Java-only apps: JVM host wired to app launch, window/input
-      (`NativeCocoa` → Win32), ANGLE on D3D11, WASAPI audio, paths under
-      `%LOCALAPPDATA%`, and the Java-side binding glue (`AppClassLoader`,
-      `ArtJniLibraryOrder`) reused from upstream
-- [ ] **Phase 3**: x86_64 native apps: full Bionic shim (fd table, epoll/eventfd,
-      pthread, mmap, signals over VEH), lazy `Java_*` binding via JVMTI
-      NativeMethodBind, ELF TLS, Vulkan, NativeActivity, picking the x86_64 split
-      from `.apkm`/`.xapk`/`.apks`
-- [ ] **Phase 4**: system services: WebView2, Media Foundation, location,
-      gamepads, clipboard, file pickers, Google sign-in in the browser
-- [ ] **Phase 5**: control panel, installer, Start-menu shortcuts per app,
-      `.apk` file association, code signing
-- [ ] **Phase 6** (research): ARM-only apps through dynarmic
+`PORTING.md` holds the design decisions, the technical findings so far, the
+known gaps, and the milestone plan up to a production release.
 
 ## Keeping up with upstream
 
