@@ -394,6 +394,23 @@ const char* intern(const std::string& s) {
     pool.emplace(s, p);
     return p;
 }
+// The guest's `environ`: a data symbol, so guest code reads the array behind
+// it directly (SDL walks it). Rebuilt on every change, under g_env_lock; an
+// old array is leaked, since another thread may still be walking it.
+char** g_environ = nullptr;
+void rebuild_environ() {
+    auto& e = env();
+    char** a = static_cast<char**>(std::calloc(e.size() + 1, sizeof(char*)));
+    size_t i = 0;
+    for (const auto& [k, v] : e) a[i++] = const_cast<char*>(intern(k + "=" + v));
+    g_environ = a;
+}
+const bool g_environ_ready = [] {
+    std::lock_guard<std::mutex> hold(g_env_lock);
+    rebuild_environ();
+    return true;
+}();
+
 WINAPK_GUEST_ABI char* g_getenv(const char* name) {
     const char* v = winapk::bionic_getenv(name);
     return const_cast<char*>(v);
@@ -605,6 +622,7 @@ const ShimSymbol kSymbols[] = {
     WINAPK_SHIM("__system_property_set", g_property_set),
     WINAPK_SHIM("android_get_device_api_level", g_get_device_api_level),
     WINAPK_SHIM("getenv", g_getenv),
+    {"environ", &g_environ},
     WINAPK_SHIM("secure_getenv", g_getenv),
     WINAPK_SHIM("setenv", g_setenv),
     WINAPK_SHIM("unsetenv", g_unsetenv),
@@ -677,14 +695,17 @@ int bionic_setenv(const char* name, const char* value, int overwrite) {
     if (!name || !*name || std::strchr(name, '=') || !value) return -bionic::kEINVAL;
     std::lock_guard<std::mutex> hold(bionic::g_env_lock);
     auto& e = bionic::env();
-    if (overwrite || e.find(name) == e.end()) e[name] = value;
+    if (overwrite || e.find(name) == e.end()) {
+        e[name] = value;
+        bionic::rebuild_environ();
+    }
     return 0;
 }
 
 int bionic_unsetenv(const char* name) {
     if (!name || !*name || std::strchr(name, '=')) return -bionic::kEINVAL;
     std::lock_guard<std::mutex> hold(bionic::g_env_lock);
-    bionic::env().erase(name);
+    if (bionic::env().erase(name)) bionic::rebuild_environ();
     return 0;
 }
 

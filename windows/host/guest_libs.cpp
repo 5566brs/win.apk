@@ -3,6 +3,7 @@
 #include "guest_libs.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -67,6 +68,21 @@ void* missing_stub(const char* name) {
     void* stub = winapk::make_tagged_zero_stub(reinterpret_cast<void*>(&report_missing), tag);
     stubs.emplace(name, stub);
     return stub;
+}
+
+// A system variable the shim does not have: zeroed memory, large enough for
+// the objects libraries import (FILE arrays, vtables, interface ids).
+void* missing_object(const char* name) {
+    static std::mutex lock;
+    static std::unordered_map<std::string, void*> blocks;
+    std::lock_guard<std::mutex> hold(lock);
+    auto it = blocks.find(name);
+    if (it != blocks.end()) return it->second;
+    void* block = std::calloc(1, 4096);
+    blocks.emplace(name, block);
+    std::fprintf(stderr, "[win.apk] guest uses a system variable not implemented on Windows yet, bound to zeroed memory: %s\n",
+                 name);
+    return block;
 }
 
 // ---- the app library behind a stub module -----------------------------------
@@ -157,6 +173,7 @@ bool guest_libs_init(JNIEnv* env, jvmtiEnv* jvmti) {
     winapk::LinkerConfig config;
     config.host = winapk::mini_bionic_resolve;
     config.load.unresolved = missing_stub;
+    config.load.unresolved_object = missing_object;
     g_linker = std::make_unique<winapk::GuestLinker>(config);
 
     // HotSpot's lookup of a native method by name ends in this static native.
@@ -196,7 +213,9 @@ extern "C" jint winapk_guest_library_loaded(JavaVM*, void* module, const wchar_t
     auto on_load = reinterpret_cast<OnLoad>(g_linker->lookup(lib, "JNI_OnLoad", nullptr, &error));
     if (!on_load) return JNI_VERSION_1_6;
     const jint version = on_load(g_guest_vm, nullptr);
-    std::fprintf(stderr, "[win.apk] %s: JNI_OnLoad returned 0x%x\n", utf8(source_of(stub_path)).c_str(),
-                 static_cast<unsigned>(version));
+    // JNI_OnLoad's address lets a guest crash address in a log be mapped
+    // back to the library (its st_value gives the load bias).
+    std::fprintf(stderr, "[win.apk] %s: JNI_OnLoad (at %p) returned 0x%x\n", utf8(source_of(stub_path)).c_str(),
+                 reinterpret_cast<void*>(on_load), static_cast<unsigned>(version));
     return version;
 }

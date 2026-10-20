@@ -49,6 +49,10 @@ struct LoadOptions {
     // name when called); null keeps the default, failing the link and listing
     // every such symbol.
     SymbolResolver unresolved;
+    // The same for an undefined data symbol (STT_OBJECT, such as `environ` or
+    // `stderr`): guest code reads through it, so a code stub would be read as
+    // data. The runtime binds a block of zeroed memory.
+    SymbolResolver unresolved_object;
 };
 
 class ElfImage {

@@ -371,8 +371,10 @@ bool ElfImage::apply_relocations(const SymbolResolver& resolve, const TlsSymbolR
             *out = 0;
             return true;
         }
-        if (options_.unresolved) {
-            if (void* stand_in = options_.unresolved(name)) {
+        const SymbolResolver& stand_in_for =
+            st_type(s.st_info) == kSttObject ? options_.unresolved_object : options_.unresolved;
+        if (stand_in_for) {
+            if (void* stand_in = stand_in_for(name)) {
                 *out = reinterpret_cast<uint64_t>(stand_in);
                 return true;
             }

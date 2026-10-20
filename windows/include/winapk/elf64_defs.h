@@ -112,6 +112,7 @@ constexpr Half kShnUndef = 0;
 constexpr uint8_t kStbLocal = 0;
 constexpr uint8_t kStbGlobal = 1;
 constexpr uint8_t kStbWeak = 2;
+constexpr uint8_t kSttObject = 1;
 constexpr uint8_t kSttTls = 6;
 
 inline uint8_t st_bind(uint8_t info) { return info >> 4; }

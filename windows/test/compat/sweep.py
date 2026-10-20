@@ -49,7 +49,8 @@ TRACE_RE = re.compile(r"^([a-z][\w.]*\.[A-Z][\w$]*(?:Exception|Error))(?::\s*(.*
 FRAMES_RE = re.compile(r"\[win\.apk\] (\d+) frames presented")
 # An app's own native code (host/guest_libs.cpp): a system function the shim
 # does not have yet, and a library that could not be loaded at all.
-GUEST_MISSING_RE = re.compile(r"guest called a system function not implemented on Windows yet, returning 0: (\S+)")
+GUEST_MISSING_RE = re.compile(
+    r"guest (?:called a system function|uses a system variable) not implemented on Windows yet, [^:]*: (\S+)")
 GUEST_LOAD_RE = re.compile(r"\[win\.apk\] cannot load (\S+?\.so): (?:cannot load \"[^\"]*\": )?(.*)$")
 
 
