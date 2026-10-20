@@ -1,6 +1,7 @@
 // thunk_test.cpp -- exercises the runtime ABI thunks (windows/src/abi_thunk.cpp)
 // without a JVM: a native-method thunk forwarding a long argument list to a
-// System V target, and a variadic entry stub feeding a va_list decoder.
+// System V target, a variadic entry stub feeding a va_list decoder, and the
+// tagged zero stub that stands in for unimplemented host natives.
 //
 // Built for Windows x64 and run under Wine in CI; it is standalone so the
 // machine-code emitter can be validated before the JNIEnv table is built on
@@ -106,12 +107,38 @@ void test_variadic_entry() {
     check("variadic entry: gp/fp va_list decode", r == 203, r, 203);
 }
 
+// The handler a tagged stub calls: records what it was given.
+const void* g_seen_first = nullptr;
+const void* g_seen_tag = nullptr;
+void tag_handler(const void* first, const void* tag) {
+    g_seen_first = first;
+    g_seen_tag = tag;
+}
+
+void test_tagged_zero_stub() {
+    static const char kTag[] = "pkg/Cls.method(I)D";
+    void* stub = make_tagged_zero_stub(reinterpret_cast<void*>(&tag_handler), kTag);
+    if (!stub) { check("tagged stub allocated", false, 0, 1); return; }
+    // Called as a Microsoft x64 function of several return types and with
+    // more arguments than the handler takes, as HotSpot would.
+    auto as_long = reinterpret_cast<long long (*)(void*, void*, int, double, int, int)>(stub);
+    auto as_double = reinterpret_cast<double (*)(void*, void*)>(stub);
+    long long r = as_long(reinterpret_cast<void*>(0xE1), reinterpret_cast<void*>(0xC1), 7, 2.5, 8, 9);
+    check("tagged stub returns 0 in rax", r == 0, r, 0);
+    check("tagged stub passes the first argument", g_seen_first == reinterpret_cast<void*>(0xE1),
+          reinterpret_cast<long long>(g_seen_first), 0xE1);
+    check("tagged stub passes its tag", g_seen_tag == kTag, 0, 0);
+    double d = as_double(nullptr, nullptr);
+    check("tagged stub returns 0.0 in xmm0", d == 0.0, static_cast<long long>(d), 0);
+}
+
 }  // namespace
 
 int main() {
     std::printf("Win.apk ABI thunk test\n");
     test_native_thunk();
     test_variadic_entry();
+    test_tagged_zero_stub();
     std::printf("\n%s: %d failure(s)\n", g_failures ? "FAILED" : "OK", g_failures);
     return g_failures;
 }

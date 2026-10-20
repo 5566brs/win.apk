@@ -51,6 +51,13 @@ void* make_jni_native_thunk(void* target, const ArgKind* args, size_t nargs, voi
 // same fixed arguments plus a pointer to a SysVVaList over the variadic part.
 void* make_sysv_variadic_entry(int named, void* handler);
 
+// A Microsoft x64 callable that calls `handler(first_arg, tag)` (an ordinary
+// Microsoft x64 function) and then returns 0 / 0.0 / nullptr, whatever its
+// caller expects. The host uses it for native methods that have no Windows
+// implementation yet: each one gets a stub tagged with its own name, so the
+// first call can be reported by name instead of failing as UnsatisfiedLinkError.
+void* make_tagged_zero_stub(void* handler, const void* tag);
+
 // The x86-64 psABI va_list (one element of the __va_list_tag array).
 struct SysVVaList {
     uint32_t gp_offset;        // next GP register slot in reg_save_area (< 48)

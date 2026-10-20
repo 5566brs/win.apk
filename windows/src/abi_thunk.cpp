@@ -244,6 +244,24 @@ void* make_sysv_variadic_entry(int named, void* handler) {
     return pool().place(e.bytes());
 }
 
+// A Microsoft x64 function that calls handler(args[0], tag) and returns zero
+// in both rax and xmm0, so it stands in for a function of any return type. A
+// Microsoft x64 caller pops its own arguments, so whatever else it passed is
+// harmless. Entry rsp is 8 mod 16; 40 bytes of shadow space plus padding
+// realign it for the call.
+void* make_tagged_zero_stub(void* handler, const void* tag) {
+    Emitter e;
+    e.sub_rsp(40);
+    e.mov_imm64(RDX, reinterpret_cast<uint64_t>(tag));
+    e.mov_imm64(R11, reinterpret_cast<uint64_t>(handler));
+    e.call(R11);
+    e.add_rsp(40);
+    e.u8(0x31); e.u8(0xc0);              // xor eax, eax
+    e.u8(0x0f); e.u8(0x57); e.u8(0xc0);  // xorps xmm0, xmm0
+    e.ret();
+    return pool().place(e.bytes());
+}
+
 uint64_t sysv_va_next_gp(SysVVaList* va) {
     uint64_t v;
     if (va->gp_offset < 48) {
