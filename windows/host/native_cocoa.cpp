@@ -287,7 +287,9 @@ void JNICALL Cocoa_exitProcess(JNIEnv*, jclass, jint code, jstring) {
 void JNICALL Cocoa_quitBackstopExit(JNIEnv* env, jclass cls) { Cocoa_exitProcess(env, cls, 0, nullptr); }
 
 // Writes 32-bit ARGB pixels as a top-down BMP, which keeps the byte order
-// (BGRA in memory) and needs no encoder.
+// (BGRA in memory) and needs no encoder. It goes to a temporary file that then
+// replaces `path`, so the process ending mid-write (the headless exit runs on
+// the render thread, not the presenting one) never leaves half a frame.
 bool write_bmp(const wchar_t* path, const jint* argb, int w, int h) {
     const uint32_t pixels = static_cast<uint32_t>(w) * static_cast<uint32_t>(h) * 4;
     BITMAPFILEHEADER fh{};
@@ -301,13 +303,14 @@ bool write_bmp(const wchar_t* path, const jint* argb, int w, int h) {
     ih.biPlanes = 1;
     ih.biBitCount = 32;
     ih.biCompression = BI_RGB;
-    HANDLE f = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    const std::wstring tmp = std::wstring(path) + L".part";
+    HANDLE f = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f == INVALID_HANDLE_VALUE) return false;
     DWORD n = 0;
     bool ok = WriteFile(f, &fh, sizeof(fh), &n, nullptr) && WriteFile(f, &ih, sizeof(ih), &n, nullptr) &&
               WriteFile(f, argb, pixels, &n, nullptr);
     CloseHandle(f);
-    return ok;
+    return ok && MoveFileExW(tmp.c_str(), path, MOVEFILE_REPLACE_EXISTING);
 }
 
 void JNICALL Cocoa_presentBitmap(JNIEnv* env, jclass, jintArray argb, jint w, jint h) {
