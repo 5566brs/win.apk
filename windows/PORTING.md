@@ -124,13 +124,15 @@ Everything in this section is merged on `main` and tested in CI on
 |---|---|
 | `include/winapk/elf64_defs.h` | ELF64 and x86-64 psABI structures and constants (Windows has no `<elf.h>`) |
 | `include/winapk/guest_abi.h` | `WINAPK_GUEST_ABI` and a table of System V versus Microsoft x64 differences |
-| `src/elf_loader.cpp` | Loads Android x86_64 shared objects: copies PT_LOAD segments; applies RELA, RELR (`DT_RELR` and `DT_ANDROID_RELR`) and Android APS2 packed relocations; sets per-page protections; resolves IRELATIVE; seals PT_GNU_RELRO; runs `DT_INIT` and `DT_INIT_ARRAY`; looks up exports |
+| `src/elf_loader.cpp` | Loads Android x86_64 shared objects: copies PT_LOAD segments; applies RELA, RELR (`DT_RELR` and `DT_ANDROID_RELR`) and Android APS2 packed relocations; sets per-page protections; resolves IRELATIVE; seals PT_GNU_RELRO; runs `DT_INIT` and `DT_INIT_ARRAY`; looks up exports and the symbol covering an address. The map, link and initialize phases can run separately |
+| `src/linker.cpp` | The guest linker: loads a library with its `DT_NEEDED` tree in bionic's order (map all, link all, constructors dependencies first), answers system libraries from the shim, keeps the registry of loaded images, and provides the guest's `dlopen`, `android_dlopen_ext`, `dlsym` (with `RTLD_DEFAULT` and `RTLD_NEXT`), `dlclose`, `dlerror` and `dladdr` |
 | `src/fs_tls_patch.cpp` | Rewrites Bionic stack-guard loads (`%fs:0x28`) to `%gs:0x28` |
 | `src/mini_bionic.cpp` | First slice of the Windows Bionic shim: malloc family, string functions, `puts`, `__android_log_write`, `__stack_chk_fail`, `__errno`, `__cxa_atexit`, `__cxa_finalize`, and `qsort` calling a guest comparator |
 | `src/abi_thunk.cpp` | Small x86-64 code emitter. Produces native-method thunks (Microsoft x64 caller to System V guest, built from a Java signature, swapping in the guest `JNIEnv*`) and System V variadic entry stubs |
 | `tools/gen_jni_slots.py`, `src/jni_slots.inc` | Generated list of the 235 `JNINativeInterface_` slots, each tagged as plain, variadic or `va_list`, with the matching `...A` slot for the variadic ones |
 | `src/guest_jni.cpp` | Guest `JNIEnv` and `JavaVM`: one shared System V table that forwards into HotSpot, a guest env per thread, and `GetEnv`, `AttachCurrentThread` and `DetachCurrentThread` |
 | `src/jni_variadic.cpp` | The `Call<T>Method`, `Call<T>MethodV` and `NewObject` families. Reads the argument stream against the method signature and calls HotSpot's `Call<T>MethodA` form |
+| `src/jni_bind.cpp` | Binds guest natives into HotSpot: the guest `RegisterNatives` slot wraps each function in a thunk, and a JVMTI `NativeMethodBind` hook swaps guest addresses for thunks. Thunks are cached per function and signature. Also the cached JVMTI signature provider |
 | `tools/elfrun_main.cpp` | `winapk-elfrun`, the loader and ABI test runner |
 | `tools/jvmrun_main.cpp` | `winapk-jvm-run`, the real-JVM end-to-end test |
 
@@ -142,12 +144,14 @@ Everything in this section is merged on `main` and tested in CI on
 | `winapk-thunk-test` | The native-method thunk handles mixed, stack-overflowing and narrow arguments and swaps the env; the variadic entry stub builds a correct `va_list` |
 | `winapk-jni-test` | The guest `JNIEnv` forwards correctly against a mock JVM, for several return types and argument shapes, and `JavaVM::GetEnv` hands back a guest env |
 | `winapk-jni-variadic-test` | The variadic bridge works for all four call kinds (virtual, static, nonvirtual, `NewObject`), for int, long, object, float and double arguments, through both `...` and `va_list` |
-| `winapk-jvm-run` | With a real HotSpot JVM: an Android x86_64 library's native method is bound through a thunk, called from Java, and calls back into Java through a variadic `CallStaticIntMethod`. `nativeAdd(3, 4)` must return 19 |
+| `winapk-linker-test` | A four-library tree (root, a `DT_NEEDED` cycle between two libraries, and a plugin opened at runtime) loads through the linker: constructors run dependencies first, symbols resolve across the cycle, `dlsym` on a library finds its dependencies' symbols, the registry tells guest from host addresses, and the guest's `dlopen`, `dlsym`, `dlerror` and `dladdr` behave like bionic's |
+| `winapk-jvm-run` | With a real HotSpot JVM: a library loaded through the linker runs its `JNI_OnLoad`, which registers `nativeMix` through the guest `RegisterNatives`; `nativeAdd` is handed to HotSpot as a raw guest address and the `NativeMethodBind` hook has to replace it. Both are called from Java, and `nativeAdd` calls back into Java through a variadic `CallStaticIntMethod`. `nativeAdd(3, 4)` must return 19 |
 
 ### Not there yet
 
 There is no app launch, no window, no graphics or audio, and the libc shim
-covers about twenty functions. The pieces above are the foundation that the
+covers about twenty functions plus libdl. HotSpot cannot yet find a guest
+library through `System.loadLibrary` (see the stub DLL note in section 6). The pieces above are the foundation that the
 roadmap in section 8 builds on.
 
 ## 5. Technical findings
@@ -209,7 +213,30 @@ nobody has to find them again.
   and `short` arrive as `int` in an integer register slot. `float` arrives as
   `double` in an SSE slot.
 - JNI has no call that returns a method's signature from a `jmethodID`. JVMTI
-  `GetMethodName` does.
+  `GetMethodName` does. Its name and generic-signature outputs may be null
+  when only the signature is wanted.
+- JVMTI `NativeMethodBind` also fires for `RegisterNatives`, with the address
+  being registered. The hook therefore has to recognize addresses that are
+  already thunks; checking "is this inside a guest image" does that for free.
+- A raw System V guest address bound in HotSpot crashes on the first call
+  (`EXCEPTION_ACCESS_VIOLATION` in the guest), so a binding path that skips
+  the thunk fails loudly rather than returning wrong values.
+
+### Linker
+
+- Bionic's dlopen flag values on LP64: `RTLD_LAZY` 1, `RTLD_NOW` 2,
+  `RTLD_NOLOAD` 4, `RTLD_GLOBAL` 0x100, `RTLD_NODELETE` 0x1000;
+  `RTLD_DEFAULT` is 0 and `RTLD_NEXT` is -1. `Dl_info` has the glibc layout.
+- When a library is linked, bionic searches the global group (the
+  executable's own dependencies, which include libc, then `RTLD_GLOBAL`
+  libraries) before the local group (the dlopen'ed root and its tree,
+  breadth-first). `dlsym` on a handle searches that handle's tree only.
+- Bionic's `dladdr` only names a symbol whose `[value, value + size)` covers
+  the address. A symbol of size 0 is never reported.
+- Guest paths are UTF-8. On Windows a `std::filesystem::path` built from a
+  `std::string` is read in the ANSI code page, so the linker uses `u8path`.
+  This matters for user names outside ASCII, which end up in
+  `%LOCALAPPDATA%`.
 
 ### JVM hosting
 
@@ -247,6 +274,17 @@ stay valid after upstream merges.
   `JNI_OnLoad` loads the ELF image and calls the guest `JNI_OnLoad` with the
   guest `JavaVM`. Because this happens inside HotSpot's own library-load call,
   the class context for `FindClass` stays correct.
+- HotSpot finds both `JNI_OnLoad` and lazily bound `Java_*` natives with
+  `GetProcAddress` on that DLL (`ClassLoader.findNative` ->
+  `NativeLibraries.findEntry0` -> `os::dll_lookup`). A fixed stub that only
+  exports `JNI_OnLoad` is therefore not enough: name-bound natives would never
+  be found. Either the stub is generated per library at install time with one
+  export per guest `Java_*` symbol (each a tiny forwarder whose target is
+  filled in at load time; `NativeMethodBind` then swaps in the real thunk), or
+  the stub's `JNI_OnLoad` registers every `Java_*` export eagerly, which needs
+  each method's signature from reflection and can run class initializers
+  earlier than Android does. The generated export table looks like the safer
+  choice and is the open design question for the next step.
 - `Java_*` natives are bound lazily. HotSpot looks them up through
   `ClassLoader.findNative`, which only searches libraries registered with the
   declaring class's loader. Upstream registers libraries with the app class
@@ -317,8 +355,15 @@ applies on Windows, where `FileDescriptor` holds a `handle`.
   other FS-relative accesses are not rewritten. This needs a decoder-driven
   pass (Zydis, MIT license). The current scanner only matches the exact
   stack-guard encodings and could also match data bytes.
-- `DT_NEEDED` is reported but not followed, and there is no global symbol
-  scope across guest libraries.
+- `dlclose` never unloads; libraries stay mapped until exit, as if loaded
+  with `RTLD_NODELETE`. Linker namespaces and `android_dlopen_ext`'s
+  `extinfo` (loading from a file descriptor or straight from the APK) are
+  ignored.
+- A library's references to symbols it defines itself are bound directly, so
+  another library cannot interpose them. Bionic allows that unless the library
+  was linked with `-Bsymbolic`.
+- Constructors run with the linker lock held. Bionic does the same, so a
+  constructor that waits on a thread calling `dlopen` deadlocks on both.
 - Variadic libc functions (the `printf` family, `__android_log_print`) are not
   bridged yet.
 - There are no signals. Mapping Windows exceptions to an Android `ucontext_t`
@@ -407,16 +452,22 @@ public preview limited to Java-only apps is possible after this milestone.
 
 ### M4. Native library integration (4 to 6 weeks)
 
-- A registry of loaded guest images with an address lookup.
-- Per-library stub DLLs returned by `findLibrary`, with a host `JNI_OnLoad`
-  that loads the image and calls the guest's.
+Done:
+
+- A registry of loaded guest images with an address lookup (`GuestLinker`).
 - JVMTI `NativeMethodBind` that installs thunks for `Java_*` natives.
 - A guest `RegisterNatives` slot that wraps every function pointer in a thunk.
+- `DT_NEEDED` loading (constructors only) and bionic's symbol scopes.
+- Guest `dlopen`, `dlsym`, `dladdr` and `dlerror` backed by the registry.
+- A JVMTI signature provider with a cache.
+
+Remaining:
+
+- Per-library stub DLLs returned by `findLibrary`, with a host `JNI_OnLoad`
+  that loads the image through the linker and calls the guest's, and an
+  export per `Java_*` symbol (section 6).
+- The Java side: `findLibrary` returning the stub's path.
 - `FindClass` with the semantics from section 6.
-- `DT_NEEDED` loading (constructors only) and a global symbol scope.
-- Guest `dlopen` and `dlsym` backed by the image registry.
-- A JVMTI signature provider with a cache (`winapk-jvm-run` has a minimal
-  version).
 
 Exit: an app with small, self-contained x86_64 JNI libraries works through the
 normal `System.loadLibrary` path.
