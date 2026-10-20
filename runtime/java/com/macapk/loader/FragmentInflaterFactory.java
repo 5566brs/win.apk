@@ -105,7 +105,12 @@ public final class FragmentInflaterFactory implements LayoutInflater.Factory2 {
             int id = attrs.getAttributeResourceValue(null, "id", View.NO_ID);
             String tag = attrs.getAttributeValue(null, "tag");
 
-            Activity activity = ActivityHost.peek();
+            // The activity that owns this inflater, as on Android, where the
+            // activity itself is its window inflater's private factory. The
+            // host stack is only a fallback: it does not hold the first
+            // activity yet while that activity's onCreate inflates its layout.
+            Activity activity = activityOf(context);
+            if (activity == null) activity = ActivityHost.peek();
             if (activity == null) return null;
 
             // WHICH MANAGER SHOULD HOST THIS? Real Android answers by TYPE, not
@@ -208,6 +213,18 @@ public final class FragmentInflaterFactory implements LayoutInflater.Factory2 {
      *  mFragments.onCreateView (Activity.java:7355). Returns the fragment's own
      *  view, or null if it could not be hosted (the inflater then substitutes
      *  its placeholder, and FragmentManagerImpl has already logged why). */
+    /** The Activity a context is, or wraps (ContextThemeWrapper and friends). */
+    private static Activity activityOf(Context context) {
+        for (int depth = 0; context != null && depth < 32; depth++) {
+            if (context instanceof Activity a) return a;
+            if (!(context instanceof android.content.ContextWrapper w)) return null;
+            Context base = w.getBaseContext();
+            if (base == context) return null;
+            context = base;
+        }
+        return null;
+    }
+
     private static View frameworkOnCreateView(Activity activity, View parent, String name,
                                               Context context, AttributeSet attrs) {
         android.app.FragmentManager fm = activity.getFragmentManager();

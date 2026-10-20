@@ -437,6 +437,11 @@ public final class ActivityHost {
         !"0".equals(System.getenv("MACAPK_ONE_MAIN_THREAD"));
     /** See onActivityFinished: a finish() from a worker thread tears the activity down on
      *  the main thread. Default ON; =0 is the pre-2026-10-12 inline teardown. */
+    /** The activity whose onCreate performLaunch is running (main thread). */
+    private static Activity sCreating;
+    /** An activity that finished during its onCreate, torn down after it. */
+    private static Activity sTeardownAfterCreate;
+
     static final boolean FINISH_ON_MAIN =
         !"0".equals(System.getenv("MACAPK_FINISH_ON_MAIN"));
 
@@ -483,6 +488,15 @@ public final class ActivityHost {
             ownerHandler().post(new Runnable() {
                 @Override public void run() { onActivityFinished(a); }
             });
+            return;
+        }
+        // finish() inside the activity's own onCreate: AOSP's teardown is a
+        // later main-thread transaction, so the rest of onCreate still runs on
+        // a live activity (a live FragmentManager above all). Tearing down
+        // here destroyed it under the app's feet: Retro Music finishes and
+        // then keeps inflating fragments. performLaunch runs it after onCreate.
+        if (a == sCreating) {
+            sTeardownAfterCreate = a;
             return;
         }
         boolean wasTop = !stack.isEmpty() && stack.peek() == a;
@@ -3553,8 +3567,19 @@ public final class ActivityHost {
         // cold launch and non-null for a relaunch, and an app distinguishes
         // "first run" from "recreated" purely by this argument.
         Bundle launchState = sRelaunchState;
-        runTolerant(activity, "onCreate", new Class<?>[]{Bundle.class},
-                new Object[]{launchState});
+        sCreating = activity;
+        try {
+            runTolerant(activity, "onCreate", new Class<?>[]{Bundle.class},
+                    new Object[]{launchState});
+        } finally {
+            sCreating = null;
+        }
+        // A finish() during onCreate only marked the activity (see sCreating);
+        // its teardown runs now that onCreate has returned, as on AOSP.
+        if (activity.isFinishing() && sTeardownAfterCreate == activity) {
+            sTeardownAfterCreate = null;
+            onActivityFinished(activity);
+        }
         // AOSP: AN ACTIVITY THAT CALLED finish() DURING onCreate IS NEVER STARTED
         // OR RESUMED. Both halves of the burst are explicitly guarded in
         // ActivityThread (android13-release core/java/android/app/ActivityThread.java):
@@ -3597,7 +3622,7 @@ public final class ActivityHost {
             NativeLog.i(TAG, className + " called finish() during onCreate --"
                 + " skipping onStart/onResume (AOSP ActivityThread.handleStartActivity"
                 + " + performResumeActivity both return early for a finished activity)."
-                + " Its teardown already ran in finish().");
+                + " Its teardown ran when onCreate returned.");
             return;
         }
         // onPostCreate comes AFTER the finished-check, and (on AOSP) after
