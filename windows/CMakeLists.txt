@@ -24,12 +24,20 @@ endif()
 
 add_library(winapk_loader STATIC
   src/elf_loader.cpp
+  src/elf_tls.cpp
   src/fs_tls_patch.cpp
   src/mini_bionic.cpp
+  src/bionic/string.cpp
+  src/bionic/printf.cpp
+  src/bionic/pthread.cpp
+  src/bionic/stdio.cpp
+  src/bionic/misc.cpp
   src/abi_thunk.cpp
   src/linker.cpp
 )
-target_include_directories(winapk_loader PUBLIC include)
+target_include_directories(winapk_loader PUBLIC include PRIVATE src)
+# WaitOnAddress (the shim's futexes) and BCryptGenRandom (arc4random).
+target_link_libraries(winapk_loader PUBLIC synchronization bcrypt)
 target_compile_definitions(winapk_loader PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX)
 if(NOT MSVC)
   target_compile_options(winapk_loader PRIVATE -Wall -Wextra)
@@ -44,11 +52,15 @@ target_link_libraries(winapk-thunk-test PRIVATE winapk_loader)
 add_executable(winapk-linker-test test/linker_test.cpp)
 target_link_libraries(winapk-linker-test PRIVATE winapk_loader)
 
+add_executable(winapk-bionic-test test/bionic_test.cpp)
+target_link_libraries(winapk-bionic-test PRIVATE winapk_loader)
+
 if(MINGW)
   # One self-contained .exe: no libstdc++/libgcc/winpthread DLLs next to it.
   target_link_options(winapk-elfrun PRIVATE -static)
   target_link_options(winapk-thunk-test PRIVATE -static)
   target_link_options(winapk-linker-test PRIVATE -static)
+  target_link_options(winapk-bionic-test PRIVATE -static)
 endif()
 
 # The JNI bridge needs jni.h + win32/jni_md.h. Point WINAPK_JNI_INCLUDE at a
@@ -94,7 +106,8 @@ if(WINAPK_JNI_INCLUDE)
   # The host that runs an APK (milestone M1). Like winapk-jvm-run it loads
   # jvm.dll at runtime.
   add_executable(winapk-runtime host/runtime_main.cpp host/host_natives.cpp host/native_log.cpp
-                              host/native_cocoa.cpp host/win32_window.cpp host/guest_libs.cpp)
+                              host/native_cocoa.cpp host/win32_window.cpp host/guest_libs.cpp
+                              host/native_os.cpp)
   target_link_libraries(winapk-runtime PRIVATE winapk_jni winapk_sqlite windowscodecs ole32)
   target_compile_options(winapk-runtime PRIVATE -Wall -Wextra)
   # Upstream's NativeSqlite bridge, compiled unchanged: compat/ supplies the

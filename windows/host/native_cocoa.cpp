@@ -30,6 +30,7 @@
 #include <windows.h>
 
 #include "win32_window.h"
+#include "winapk/mini_bionic.h"
 
 namespace winapk::host {
 
@@ -181,6 +182,17 @@ void JNICALL Cocoa_moveTaskToBack(JNIEnv*, jclass) { window_minimize(); }
 void JNICALL Cocoa_moveTaskToFront(JNIEnv*, jclass) { window_restore(); }
 void JNICALL Cocoa_setStartingWindowColor(JNIEnv*, jclass, jint argb) {
     window_set_background(static_cast<uint32_t>(argb));
+}
+
+// Upstream mirrors the app's System.setProperty calls into the native property
+// store so guest code reading __system_property_get sees the same values.
+void JNICALL Cocoa_setSystemProperty(JNIEnv* env, jclass, jstring key, jstring value) {
+    if (!key) return;
+    const char* k = env->GetStringUTFChars(key, nullptr);
+    const char* v = value ? env->GetStringUTFChars(value, nullptr) : nullptr;
+    if (k) winapk::property_set(k, v ? v : "");
+    if (v) env->ReleaseStringUTFChars(value, v);
+    if (k) env->ReleaseStringUTFChars(key, k);
 }
 
 void JNICALL Cocoa_setWindowTitle(JNIEnv* env, jclass, jlong, jstring title) {
@@ -396,6 +408,8 @@ const HostMethod kMethods[] = {
     WINAPK_HOST_NATIVE(kCls, "moveTaskToBack", "()V", Cocoa_moveTaskToBack),
     WINAPK_HOST_NATIVE(kCls, "moveTaskToFront", "()V", Cocoa_moveTaskToFront),
     WINAPK_HOST_NATIVE(kCls, "setStartingWindowColor", "(I)V", Cocoa_setStartingWindowColor),
+    WINAPK_HOST_NATIVE(kCls, "setSystemProperty", "(Ljava/lang/String;Ljava/lang/String;)V",
+                       Cocoa_setSystemProperty),
     WINAPK_HOST_NATIVE(kCls, "setWindowTitle", "(JLjava/lang/String;)V", Cocoa_setWindowTitle),
     WINAPK_HOST_NATIVE(kCls, "presentFrame", "([IIIIIIII)I", Cocoa_presentFrame),
     WINAPK_HOST_NATIVE(kCls, "setRenderer", "(JLcom/macapk/loader/MetalSurfaceCallbacks;)V", Cocoa_setRenderer),

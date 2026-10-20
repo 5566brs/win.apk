@@ -3,6 +3,7 @@
 #include "winapk/elf_loader.h"
 
 #include "winapk/elf64_defs.h"
+#include "winapk/elf_tls.h"
 #include "winapk/fs_tls_patch.h"
 #include "winapk/guest_abi.h"
 
@@ -161,8 +162,15 @@ std::unique_ptr<ElfImage> ElfImage::map(const std::filesystem::path& path, std::
             img->relro_vaddr_ = ph.p_vaddr;
             img->relro_memsz_ = ph.p_memsz;
         } else if (ph.p_type == kPtTls) {
-            *error = "the library uses ELF TLS (PT_TLS), which Win.apk does not support yet";
-            return nullptr;
+            if (ph.p_filesz > ph.p_memsz) {
+                *error = "PT_TLS " + std::to_string(i) + " is malformed";
+                return nullptr;
+            }
+            img->has_tls_ = true;
+            img->tls_vaddr_ = ph.p_vaddr;
+            img->tls_filesz_ = ph.p_filesz;
+            img->tls_memsz_ = ph.p_memsz;
+            img->tls_align_ = ph.p_align;
         }
     }
     if (img->loads_.empty()) {
@@ -176,6 +184,16 @@ std::unique_ptr<ElfImage> ElfImage::map(const std::filesystem::path& path, std::
 
     if (!img->map_segments(file, error)) return nullptr;
     if (!img->read_dynamic(error)) return nullptr;
+    if (img->has_tls_) {
+        if (img->tls_filesz_ && !img->in_image(img->tls_vaddr_, img->tls_filesz_)) {
+            *error = "PT_TLS initialization image outside the image";
+            return nullptr;
+        }
+        // The template is read on each thread's first access, after link()
+        // has relocated it in place.
+        img->tls_module_ = tls_register_module(img->at<const void>(img->tls_vaddr_), img->tls_filesz_,
+                                               img->tls_memsz_, img->tls_align_);
+    }
 
     if (options.patch_fs_stack_guard) {
         for (const Segment& s : img->loads_) {
@@ -189,9 +207,10 @@ std::unique_ptr<ElfImage> ElfImage::map(const std::filesystem::path& path, std::
     return img;
 }
 
-bool ElfImage::link(const SymbolResolver& resolve, std::string* error) {
+bool ElfImage::link(const SymbolResolver& resolve, std::string* error,
+                    const TlsSymbolResolver& resolve_tls) {
     if (linked_) return true;
-    if (!apply_relocations(resolve, error)) return false;
+    if (!apply_relocations(resolve, resolve_tls, error)) return false;
     if (!protect_segments(error)) return false;
     if (!apply_irelative(error)) return false;
     seal_relro();
@@ -206,6 +225,7 @@ void ElfImage::initialize() {
 
 ElfImage::~ElfImage() {
     if (initialized_) run_finalizers();
+    if (tls_module_) tls_unregister_module(tls_module_);
     if (mem_) VirtualFree(mem_, 0, MEM_RELEASE);
 }
 
@@ -316,13 +336,17 @@ bool ElfImage::read_dynamic(std::string* error) {
         const Sym& s = syms[i];
         const uint8_t bind = st_bind(s.st_info);
         if (s.st_shndx == kShnUndef || (bind != kStbGlobal && bind != kStbWeak)) continue;
-        if (st_type(s.st_info) == kSttTls) continue;
+        if (st_type(s.st_info) == kSttTls) {
+            tls_exports_.emplace(str(s.st_name), s.st_value);
+            continue;
+        }
         exports_.emplace(str(s.st_name), bias_ + s.st_value);
     }
     return true;
 }
 
-bool ElfImage::apply_relocations(const SymbolResolver& resolve, std::string* error) {
+bool ElfImage::apply_relocations(const SymbolResolver& resolve, const TlsSymbolResolver& resolve_tls,
+                                 std::string* error) {
     const Sym* syms = at<const Sym>(symtab_);
     const char* strtab = at<const char>(strtab_);
     std::vector<std::string> missing;
@@ -332,7 +356,7 @@ bool ElfImage::apply_relocations(const SymbolResolver& resolve, std::string* err
         const Sym& s = syms[idx];
         const char* name = strtab + s.st_name;
         if (st_type(s.st_info) == kSttTls) {
-            fatal = std::string("ELF TLS symbol ") + name + " is not supported yet";
+            fatal = std::string("TLS symbol ") + name + " used by a non-TLS relocation";
             return false;
         }
         if (s.st_shndx != kShnUndef) {
@@ -356,6 +380,24 @@ bool ElfImage::apply_relocations(const SymbolResolver& resolve, std::string* err
         if (std::find(missing.begin(), missing.end(), name) == missing.end()) missing.push_back(name);
         *out = 0;
         return true;  // keep going so every missing symbol is reported at once
+    };
+
+    // The (module, offset) pair of a dynamic TLS relocation's symbol. Symbol 0
+    // stands for this library's own block (local-dynamic code).
+    auto tls_symbol_value = [&](uint32_t idx, size_t* module, uint64_t* offset) -> bool {
+        if (idx == 0 || syms[idx].st_shndx != kShnUndef) {
+            if (!tls_module_) {
+                fatal = "TLS relocation in a library without PT_TLS";
+                return false;
+            }
+            *module = tls_module_;
+            *offset = idx == 0 ? 0 : syms[idx].st_value;
+            return true;
+        }
+        const char* name = strtab + syms[idx].st_name;
+        if (resolve_tls && resolve_tls(name, module, offset)) return true;
+        fatal = std::string("undefined TLS symbol ") + name;
+        return false;
     };
 
     auto apply = [&](const Rela& r) -> bool {
@@ -387,9 +429,15 @@ bool ElfImage::apply_relocations(const SymbolResolver& resolve, std::string* err
                 irelative_addends_.push_back(r.r_addend);
                 break;
             case kRX86_64_DtpMod64:
-            case kRX86_64_DtpOff64:
+            case kRX86_64_DtpOff64: {
+                size_t module = 0;
+                uint64_t offset = 0;
+                if (!tls_symbol_value(r_sym(r.r_info), &module, &offset)) return false;
+                *where = type == kRX86_64_DtpMod64 ? module : offset + r.r_addend;
+                break;
+            }
             case kRX86_64_TpOff64:
-                fatal = "ELF TLS relocation type " + std::to_string(type) + " is not supported yet";
+                fatal = "static ELF TLS (R_X86_64_TPOFF64) is not supported";
                 return false;
             default:
                 fatal = "unsupported x86_64 relocation type " + std::to_string(type);
@@ -583,6 +631,14 @@ void ElfImage::run_finalizers() {
 void* ElfImage::dlsym(const char* name) const {
     auto it = exports_.find(name);
     return it == exports_.end() ? nullptr : reinterpret_cast<void*>(it->second);
+}
+
+bool ElfImage::tls_symbol(const char* name, uint64_t* offset) const {
+    if (!tls_module_) return false;
+    auto it = tls_exports_.find(name);
+    if (it == tls_exports_.end()) return false;
+    *offset = it->second;
+    return true;
 }
 
 bool ElfImage::symbol_at(const void* p, const char** name, void** start) const {

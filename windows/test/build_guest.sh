@@ -57,6 +57,12 @@ link_lib BASE libwinapk_link_base -L"$STUBS" -lwinapk_link_mid
 link_lib MID libwinapk_link_mid -L"$LINK" -L"$STUBS" -lwinapk_link_base -llog
 link_lib ROOT libwinapk_link_root -L"$LINK" -L"$STUBS" -lwinapk_link_mid -lc -ldl
 
+# The Bionic shim's guest-side test (winapk-bionic-test). Real ELF TLS, as an
+# NDK build for minSdk 29 or later uses.
+"$CC" "${COMMON[@]}" -fno-emulated-tls -Wl,-soname,libwinapk_bionic_guest.so \
+    -o "$OUT/libwinapk_bionic_guest.so" "$HERE/guest/bionic_guest.c"
+
 echo "[build_guest] $OUT/libwinapk_poc_guest.so"
 echo "[build_guest] $OUT/libwinapk_poc_guest_packed.so"
 echo "[build_guest] $LINK/libwinapk_link_{root,mid,base,plugin}.so"
+echo "[build_guest] $OUT/libwinapk_bionic_guest.so"

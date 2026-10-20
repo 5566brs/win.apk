@@ -81,6 +81,7 @@ const HostMethods kProviders[] = {
     native_log_methods(),
     native_cocoa_methods(),
     native_linker_methods(),
+    native_os_methods(),
 };
 
 const JNINativeMethod* implementation_of(const char* clazz, const char* name, const char* sig) {

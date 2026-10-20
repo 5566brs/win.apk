@@ -6,10 +6,9 @@
 // so every export here is a WINAPK_GUEST_ABI wrapper around the Windows CRT,
 // handed to the ELF loader through a name table instead of the PE export table.
 //
-// This slice holds what the PoC guest needs: allocation, string/memory
-// routines, stdout, liblog's non-variadic entry point, the stack-protector
-// failure hook, errno and the C++ atexit pair. qsort shows the other direction
-// of the boundary: a guest comparator called back from host code.
+// mini_bionic.cpp holds the core (allocation, errno, the C++ atexit pair,
+// qsort's guest comparator) and the lookup; the rest lives in src/bionic/,
+// one module per area, each with its own table (bionic_internal.h).
 
 #pragma once
 
@@ -22,5 +21,15 @@ void* mini_bionic_resolve(const char* name);
 
 // Runs the destructors guest code registered with __cxa_atexit, newest first.
 void mini_bionic_run_atexit();
+
+// The guest's system properties (__system_property_get). The Java framework
+// pushes its values here (NativeCocoa.setSystemProperty); null erases.
+void property_set(const char* name, const char* value);
+
+// The guest's environment (getenv/setenv), apart from the host's. setenv and
+// unsetenv return 0 or -errno (Linux numbering), as NativeOs expects.
+const char* bionic_getenv(const char* name);
+int bionic_setenv(const char* name, const char* value, int overwrite);
+int bionic_unsetenv(const char* name);
 
 }  // namespace winapk

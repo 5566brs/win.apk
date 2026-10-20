@@ -15,7 +15,7 @@
 //   5. run DT_INIT and DT_INIT_ARRAY.
 //
 // Not handled yet (the loader fails with a clear message instead):
-//   * ELF TLS relocations (R_X86_64_DTPMOD64/DTPOFF64/TPOFF64).
+//   * static ELF TLS (R_X86_64_TPOFF64); dynamic TLS is in elf_tls.h.
 //   * DT_NEEDED between guest libraries is reported, not followed: the caller's
 //     resolver decides what an undefined symbol binds to. GuestLinker
 //     (linker.h) is the caller that follows it.
@@ -35,6 +35,9 @@ namespace winapk {
 
 // Returns the host address for an undefined guest symbol, or nullptr.
 using SymbolResolver = std::function<void*(const char* name)>;
+// Finds an undefined guest TLS symbol in another library: its TLS module id
+// (elf_tls.h) and its offset in that module's block. False if nobody has it.
+using TlsSymbolResolver = std::function<bool(const char* name, size_t* module, uint64_t* offset)>;
 
 struct LoadOptions {
     // Rewrite %fs:0x28 stack-guard loads to %gs:0x28. Turning it off is only
@@ -67,7 +70,8 @@ public:
                                          const LoadOptions& options = {});
     // link: steps 3 and 4. IRELATIVE resolvers run here, so this is the first
     // point at which guest code executes. Calling it again is a no-op.
-    bool link(const SymbolResolver& resolve, std::string* error);
+    bool link(const SymbolResolver& resolve, std::string* error,
+              const TlsSymbolResolver& resolve_tls = {});
     // initialize: step 5. Runs once; does nothing before link() succeeded.
     void initialize();
     bool linked() const { return linked_; }
@@ -82,6 +86,11 @@ public:
     void* dlsym(const char* name) const;
     // Every exported symbol and its address.
     const std::unordered_map<std::string, uintptr_t>& exports() const { return exports_; }
+
+    // The library's TLS module id (elf_tls.h), or 0 if it has no PT_TLS.
+    size_t tls_module() const { return tls_module_; }
+    // The offset of an exported TLS symbol in this library's TLS block.
+    bool tls_symbol(const char* name, uint64_t* offset) const;
 
     // True if `p` lies inside the mapped image.
     bool contains(const void* p) const {
@@ -108,7 +117,8 @@ private:
 
     bool map_segments(const std::vector<uint8_t>& file, std::string* error);
     bool read_dynamic(std::string* error);
-    bool apply_relocations(const SymbolResolver& resolve, std::string* error);
+    bool apply_relocations(const SymbolResolver& resolve, const TlsSymbolResolver& resolve_tls,
+                           std::string* error);
     bool protect_segments(std::string* error);
     bool apply_irelative(std::string* error);
     void seal_relro();
@@ -131,6 +141,9 @@ private:
     bool has_relro_ = false;
     uint64_t relro_vaddr_ = 0, relro_memsz_ = 0;
     uint64_t dynamic_vaddr_ = 0;
+    bool has_tls_ = false;
+    uint64_t tls_vaddr_ = 0, tls_filesz_ = 0, tls_memsz_ = 0, tls_align_ = 0;
+    size_t tls_module_ = 0;
 
     // From PT_DYNAMIC (vaddrs; 0 = absent).
     uint64_t strtab_ = 0, strsz_ = 0, symtab_ = 0, hash_ = 0, gnu_hash_ = 0;
@@ -145,6 +158,7 @@ private:
     std::vector<std::string> needed_;
     size_t nsyms_ = 0;
     std::unordered_map<std::string, uintptr_t> exports_;
+    std::unordered_map<std::string, uint64_t> tls_exports_;  // offsets in the TLS block
     std::vector<uint64_t> irelative_slots_;  // vaddrs; resolved after protect
     std::vector<int64_t> irelative_addends_;
 

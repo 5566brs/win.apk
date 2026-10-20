@@ -208,9 +208,23 @@ GuestLibrary* GuestLinker::open(const std::string& name, int flags, std::string*
         }
         return nullptr;
     };
+    TlsSymbolResolver tls_scope = [&](const char* sym, size_t* module, uint64_t* offset) -> bool {
+        auto find = [&](GuestLibrary* l) {
+            if (l == system_.get() || !l->image->tls_symbol(sym, offset)) return false;
+            *module = l->image->tls_module();
+            return true;
+        };
+        for (GuestLibrary* l : globals) {
+            if (find(l)) return true;
+        }
+        for (GuestLibrary* l : group) {
+            if (find(l)) return true;
+        }
+        return false;
+    };
     for (const auto& l : fresh) {
         std::string why;
-        if (!l->image->link(scope, &why)) {
+        if (!l->image->link(scope, &why, tls_scope)) {
             *error = "cannot link \"" + l->file + "\": " + why;
             return nullptr;
         }

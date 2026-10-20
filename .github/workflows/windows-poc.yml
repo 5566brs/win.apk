@@ -82,6 +82,10 @@ jobs:
         run: ./build/winapk-elfrun.exe guest/libwinapk_poc_guest.so guest/libwinapk_poc_guest_packed.so
       - name: Run the guest linker test
         run: ./build/winapk-linker-test.exe guest/link
+      - name: Run the Bionic shim test
+        run: |
+          mkdir -p bionic-scratch
+          ./build/winapk-bionic-test.exe guest/libwinapk_bionic_guest.so "$(cygpath -w "$PWD/bionic-scratch")"
       - name: Run the real-JVM end-to-end test
         run: |
           export PATH="$(cygpath -u "$JAVA_HOME")/bin/server:$(cygpath -u "$JAVA_HOME")/bin:$PATH"

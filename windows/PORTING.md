@@ -137,7 +137,7 @@ Everything in this section is merged on `main` and tested in CI on
 | `src/elf_loader.cpp` | Loads Android x86_64 shared objects: copies PT_LOAD segments; applies RELA, RELR (`DT_RELR` and `DT_ANDROID_RELR`) and Android APS2 packed relocations; sets per-page protections; resolves IRELATIVE; seals PT_GNU_RELRO; runs `DT_INIT` and `DT_INIT_ARRAY`; looks up exports and the symbol covering an address. The map, link and initialize phases can run separately |
 | `src/linker.cpp` | The guest linker: loads a library with its `DT_NEEDED` tree in bionic's order (map all, link all, constructors dependencies first), answers system libraries from the shim, keeps the registry of loaded images, and provides the guest's `dlopen`, `android_dlopen_ext`, `dlsym` (with `RTLD_DEFAULT` and `RTLD_NEXT`), `dlclose`, `dlerror` and `dladdr` |
 | `src/fs_tls_patch.cpp` | Rewrites Bionic stack-guard loads (`%fs:0x28`) to `%gs:0x28` |
-| `src/mini_bionic.cpp` | First slice of the Windows Bionic shim: malloc family, string functions, `puts`, `__android_log_write`, `__stack_chk_fail`, `__errno`, `__cxa_atexit`, `__cxa_finalize`, and `qsort` calling a guest comparator |
+| `src/mini_bionic.cpp`, `src/bionic/` | The Windows Bionic shim. `mini_bionic.cpp` holds the core (malloc family, `__stack_chk_fail`, `__cxa_atexit`, `qsort` with a guest comparator, Linux `errno` translation from the UCRT and Win32) and merges the module tables: `string.cpp` (string.h, ctype, 32-bit `wchar_t`, `strto*`, FORTIFY `_chk`), `printf.cpp` (a printf engine reading the System V `va_list`, the printf family and liblog's variadic calls), `pthread.cpp` (futex-style mutexes, condition variables, rwlocks, once, keys and threads on `WaitOnAddress` over bionic's struct layouts, plus semaphores), `stdio.cpp` (file descriptors, `stat` in bionic's layout, directories, `FILE`) and `misc.cpp` (clocks and time, `mmap` on `VirtualAlloc`, system properties, the guest environment, `sysconf`, `uname`, `getauxval`, `arc4random`, libm) |
 | `src/abi_thunk.cpp` | Small x86-64 code emitter. Produces native-method thunks (Microsoft x64 caller to System V guest, built from a Java signature, swapping in the guest `JNIEnv*`) and System V variadic entry stubs |
 | `tools/gen_jni_slots.py`, `src/jni_slots.inc` | Generated list of the 235 `JNINativeInterface_` slots, each tagged as plain, variadic or `va_list`, with the matching `...A` slot for the variadic ones |
 | `src/guest_jni.cpp` | Guest `JNIEnv` and `JavaVM`: one shared System V table that forwards into HotSpot, a guest env per thread, and `GetEnv`, `AttachCurrentThread` and `DetachCurrentThread` |
@@ -163,6 +163,7 @@ Everything in this section is merged on `main` and tested in CI on
 | `winapk-jni-test` | The guest `JNIEnv` forwards correctly against a mock JVM, for several return types and argument shapes, and `JavaVM::GetEnv` hands back a guest env |
 | `winapk-jni-variadic-test` | The variadic bridge works for all four call kinds (virtual, static, nonvirtual, `NewObject`), for int, long, object, float and double arguments, through both `...` and `va_list` |
 | `winapk-linker-test` | A four-library tree (root, a `DT_NEEDED` cycle between two libraries, and a plugin opened at runtime) loads through the linker: constructors run dependencies first, symbols resolve across the cycle, `dlsym` on a library finds its dependencies' symbols, the registry tells guest from host addresses, and the guest's `dlopen`, `dlsym`, `dlerror` and `dladdr` behave like bionic's |
+| `winapk-bionic-test` | `test/guest/bionic_guest.c` exercises the shim from guest code: string and ctype functions, `strerror` with Linux numbering, `snprintf` through the System V `va_list` (integers, floats, strings, `%n`, `*` widths), mutexes, condition variables and threads, keys with destructors, files and `stat`, directories, `FILE` I/O, ELF TLS across threads (`.tdata` and `.tbss`, local- and general-dynamic), system properties, `setenv`/`getenv`, clocks, `mmap` and `sysconf` |
 | `winapk-jvm-run` | With a real HotSpot JVM: a library loaded through the linker runs its `JNI_OnLoad`, which registers `nativeMix` through the guest `RegisterNatives`; `nativeAdd` is handed to HotSpot as a raw guest address and the `NativeMethodBind` hook has to replace it. Both are called from Java, and `nativeAdd` calls back into Java through a variadic `CallStaticIntMethod`. `nativeAdd(3, 4)` must return 19 |
 | Headless boot (CI) | `winapk-runtime` boots the F-Droid Sudoku APK on `windows-latest`: DEX conversion, `Application.onCreate`, the first activity resumed, and 30 frames presented. The log and the last frame are a CI artifact |
 
@@ -192,7 +193,7 @@ implements in `runtime/src`; on Windows `windows/host/native_*.cpp`):
 | `NativeCocoa` | 56 | `cocoa_bridge.mm`, `native_methods.cpp` | Win32 window, input, render tick | 24 done | 1 |
 | `NativeLog` | 6 | `native_methods.cpp` | `native_log.cpp` | 3 done | 1 |
 | `NativeSqlite` | 26 | `native_sqlite.cpp` | upstream file + CoreFoundation shim | done | - |
-| `NativeOs` | 18 | `native_os.cpp` | raw file descriptors and the guest environment, on the Windows CRT | not started | 1 |
+| `NativeOs` | 18 | `native_os.cpp` | `host/native_os.cpp`: the guest environment shared with the shim; raw file descriptors on the Windows CRT next | 3 done | 1 |
 | `NativeLooper` | 12 | `native_methods.cpp` | the guest's `ALooper`, with M4 | not started | 2 |
 | `NativeLinker` | 3 | `native_linker.cpp` | `host/guest_libs.cpp` | done | - |
 | `NativeAudio` | 41 | `audio_backend.mm` | WASAPI | not started | 2 |
@@ -231,9 +232,9 @@ implements in `runtime/src`; on Windows `windows/host/native_*.cpp`):
 
 | Mac source | Lines | What it does | Windows | Status |
 |---|---|---|---|---|
-| `arm64_native.cpp`, `arm64_pack.cpp`, `arm64_macho_emit.cpp` | 17,585 | load arm64 `.so` on Apple Silicon | `src/elf_loader.cpp`, `src/linker.cpp`, `host/guest_libs.cpp` (x86_64) | done, ELF TLS missing |
+| `arm64_native.cpp`, `arm64_pack.cpp`, `arm64_macho_emit.cpp` | 17,585 | load arm64 `.so` on Apple Silicon | `src/elf_loader.cpp`, `src/linker.cpp`, `host/guest_libs.cpp` (x86_64) | done; dynamic ELF TLS done, static TLS missing |
 | `main.cpp` (translator CLI) | 9,744 | `.so` to a host library | `host/translator_main.cpp` + `host/guest_stub.cpp` | done |
-| `bionic_shim.cpp` | 66,962 | Android's libc, libdl, liblog, libm, libandroid... on Darwin | `src/mini_bionic.cpp` on the Windows CRT and Win32 (M5) | 23 functions |
+| `bionic_shim.cpp` | 66,962 | Android's libc, libdl, liblog, libm, libandroid... on Darwin | `src/mini_bionic.cpp` and `src/bionic/` on the Windows CRT and Win32 (M5) | about 370 functions |
 | `bionic_shim_jni_bare.cpp`, `_jni_cxxwrap.cpp` | 1,119 | variadic JNI calls | `src/jni_variadic.cpp` | done |
 | `bionic_shim_sigchain.cpp`, `_signal.cpp` | 1,913 | signals and chaining with the JVM | vectored exception handling (M5) | not started |
 | `bionic_shim_sensors.cpp` | 540 | NDK sensors | port as is (M5) | not started |
@@ -550,7 +551,9 @@ applies on Windows, where `FileDescriptor` holds a `handle`.
 
 ### Loader and shim
 
-- ELF TLS (`PT_TLS` and TLS relocations) is refused. `%fs:0` (`__get_tls`) and
+- Dynamic ELF TLS works (`src/elf_tls.cpp`: `__tls_get_addr`, `DTPMOD64` and
+  `DTPOFF64`, a lazily allocated block per thread and module). Static TLS
+  (`TPOFF64`, the initial-exec model) is refused. `%fs:0` (`__get_tls`) and
   other FS-relative accesses are not rewritten. This needs a decoder-driven
   pass (Zydis, MIT license). The current scanner only matches the exact
   stack-guard encodings and could also match data bytes.
@@ -685,8 +688,8 @@ Done:
 
 Remaining:
 
-- ELF TLS (`PT_TLS` and its relocations). Chrome's `libchrome.so` needs it;
-  every library built for API 29+ may.
+- Static ELF TLS (`TPOFF64`). Dynamic TLS, which app libraries built for
+  API 29+ use, is done.
 - `FindClass` with the semantics from section 6.
 
 Exit: an app with small, self-contained x86_64 JNI libraries works through the
@@ -706,7 +709,7 @@ normal `System.loadLibrary` path.
 - `fork` failing with `EAGAIN`.
 - `/proc` emulation for the common reads (`self/maps`, `cpuinfo`).
 - Locale, liblog including its variadic functions, libm and libz.
-- ELF TLS and FS-relative rewriting with a decoder.
+- FS-relative rewriting with a decoder (dynamic ELF TLS is done).
 
 Upstream's `bionic_shim.cpp` is the behavioral reference. It records many
 problems found in real apps as general fixes.
