@@ -118,6 +118,9 @@ Windows hook is unavoidable, and every such change is listed here:
 - `runtime/java/android/view/ViewPropertyAnimator.java`: starts by itself on
   the next frame when the app never calls `start()`, as on Android. Not
   Windows-specific; worth offering upstream.
+- `runtime/java/android/widget/RatingBar.java` and `ProgressBar.java`: a rating
+  bar reads `numStars`, `rating`, `stepSize` and `isIndicator` from XML and
+  measures one row of stars, as AOSP does. Not Windows-specific.
 
 ## License
 

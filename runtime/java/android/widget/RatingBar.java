@@ -22,12 +22,48 @@ public class RatingBar extends AbsSeekBar {
     private OnRatingBarChangeListener mListener;
 
     public RatingBar(Context context) { super(context); init(); }
-    public RatingBar(Context context, AttributeSet attrs) { super(context, attrs); init(); }
+    public RatingBar(Context context, AttributeSet attrs) { super(context, attrs); init(); applyAttrs(attrs); }
     public RatingBar(Context context, AttributeSet attrs, int defStyleAttr) {
-        super(context, attrs, defStyleAttr); init();
+        super(context, attrs, defStyleAttr); init(); applyAttrs(attrs);
     }
     public RatingBar(Context context, AttributeSet attrs, int defStyleAttr, int defStyleRes) {
-        super(context, attrs, defStyleAttr, defStyleRes); init();
+        super(context, attrs, defStyleAttr, defStyleRes); init(); applyAttrs(attrs);
+    }
+
+    /** AOSP RatingBar(Context, AttributeSet, int, int) reads numStars,
+     *  isIndicator, rating and stepSize, and applies them in this order. */
+    private void applyAttrs(AttributeSet attrs) {
+        if (attrs == null) return;
+        final String ns = "http://schemas.android.com/apk/res/android";
+        try {
+            final int numStars = attrs.getAttributeIntValue(ns, "numStars", mNumStars);
+            setIsIndicator(attrs.getAttributeBooleanValue(ns, "isIndicator", mIsIndicator));
+            final float rating = attrs.getAttributeFloatValue(ns, "rating", -1f);
+            final float stepSize = attrs.getAttributeFloatValue(ns, "stepSize", -1f);
+            if (numStars > 0 && numStars != mNumStars) setNumStars(numStars);
+            if (stepSize > 0) setStepSize(stepSize);
+            if (rating >= 0) setRating(rating);
+        } catch (Throwable ignored) {}
+    }
+
+    /** AOSP RatingBar.onMeasure: as wide as numStars tiles of the progress
+     *  drawable (ProgressBar.tileify repeats it horizontally). Without it the
+     *  bar took whatever box it was given and the repeating stars filled it.
+     *  The height is the drawable's own, at least minHeight, plus padding.
+     *  AOSP also caps it at maxHeight, but the cap comes from the rating bar
+     *  style (57dip), which this port does not read yet; ProgressBar's raw
+     *  48 px fallback cut the stars in half. */
+    @Override protected synchronized void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+        super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+        final int sample = macapkSampleWidth();
+        if (sample <= 0) return;
+        final android.graphics.drawable.Drawable d = getCurrentDrawable();
+        int dh = d != null ? d.getIntrinsicHeight() : 0;
+        dh = Math.max(getMinHeight(), dh);
+        final int w = sample * mNumStars + getPaddingLeft() + getPaddingRight();
+        final int h = dh + getPaddingTop() + getPaddingBottom();
+        setMeasuredDimension(resolveSizeAndState(w, widthMeasureSpec, 0),
+                             resolveSizeAndState(h, heightMeasureSpec, 0));
     }
 
     /** AOSP RatingBar(Context, AttributeSet) is

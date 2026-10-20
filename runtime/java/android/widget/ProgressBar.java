@@ -566,6 +566,9 @@ public class ProgressBar extends View {
     private int mMinWidth = 24, mMaxWidth = 48, mMinHeight = 24, mMaxHeight = 48;
     private android.view.animation.Interpolator mInterpolator;
     private int mSampleWidth = 0;
+    /** AOSP keeps mSampleWidth package-visible for RatingBar.onMeasure: the
+     *  width of one tile of the progress drawable, i.e. one star. */
+    int macapkSampleWidth() { return mSampleWidth; }
 
     /** AOSP :1478 -- whichever of the progress/indeterminate drawables is
      *  currently being painted. */

@@ -313,9 +313,10 @@ nobody has to find them again.
   Android starts it on the next frame by itself. Fixed here (listed in
   `README.md`): a fade-in written as `view.animate().alpha(1f)` left a whole
   screen invisible.
-- Upstream gap still open: `RatingBar` draws as a grid of stars filling its
-  whole box instead of one row of `numStars` (Privacy Friendly Sudoku's
-  difficulty bar), which also pushes the content below it out of view.
+- Upstream's `RatingBar` read none of its XML attributes and had no
+  `onMeasure`, so it drew as a grid of stars filling its box. Fixed here
+  (listed in `README.md`). The rating bar style's `maxHeight` is not read
+  yet, so the height is the star drawable's own.
 - Under Wine, a window needs an X display. `Xvfb :99` plus `xdotool` (clicks,
   keys) and ImageMagick's `import -window root` (screenshots) are enough to
   drive an app from a script.
