@@ -74,7 +74,7 @@ if(WINAPK_JNI_INCLUDE)
   # The host that runs an APK (milestone M1). Like winapk-jvm-run it loads
   # jvm.dll at runtime.
   add_executable(winapk-runtime host/runtime_main.cpp host/host_natives.cpp host/native_log.cpp
-                              host/native_cocoa.cpp)
+                              host/native_cocoa.cpp host/win32_window.cpp)
   target_link_libraries(winapk-runtime PRIVATE winapk_jni)
   target_compile_options(winapk-runtime PRIVATE -Wall -Wextra)
 
