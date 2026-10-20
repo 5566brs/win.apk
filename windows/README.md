@@ -112,6 +112,9 @@ Windows hook is unavoidable, and every such change is listed here:
 
 - `.github/workflows/cla.yml`: the CLA job runs only in `kksimp/Mac.apk`.
 - `README.md`: a Win.apk section at the top.
+- `runtime/java/android/content/res/Resources.java`: `getIntArray` resolves the
+  items of a typed `<array>` (for example a list of color references) instead
+  of returning an empty array. Not Windows-specific; worth offering upstream.
 
 ## License
 

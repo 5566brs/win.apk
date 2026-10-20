@@ -82,9 +82,9 @@ D1. Target Windows x64 with an x86_64 guest ABI. ARM-only apps come later, if
 at all.
 
 D2. Leave the upstream tree alone. All Windows code lives under `windows/`. The
-only upstream files changed so far are `.github/workflows/cla.yml` (the CLA job
-now runs only in `kksimp/Mac.apk`) and `README.md` (a Win.apk section at the
-top). Every future change to an upstream file must be listed in
+upstream files changed so far are listed in `windows/README.md`; apart from
+the CLA job and the top-level README, the only one is a framework bug fix in
+`Resources.java` that is not Windows-specific. Every future change to an upstream file must be listed in
 `windows/README.md`. This keeps `git merge upstream/main` cheap.
 
 D3. Use clang only. MSVC cannot emit System V calls. MinGW GCC 13 accepts
@@ -311,9 +311,11 @@ nobody has to find them again.
 - Under Wine, a window needs an X display. `Xvfb :99` plus `xdotool` (clicks,
   keys) and ImageMagick's `import -window root` (screenshots) are enough to
   drive an app from a script.
-- Upstream gap, not Windows-specific: `Resources.getIntArray` on an
-  `<array>` whose items are color references returns an empty array (the
-  Sudoku tutorial's dot colors). Worth reporting upstream.
+- Upstream gap, not Windows-specific, fixed here (listed in `README.md`):
+  `Resources.getIntArray` on an `<array>` whose items are color references
+  returned an empty array, which crashed the Sudoku tutorial's `onCreate`
+  before its buttons got listeners. It now resolves each item like AOSP's
+  `AssetManager.getResourceIntArray`.
 
 ### GitHub
 

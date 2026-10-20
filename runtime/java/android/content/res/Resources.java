@@ -1048,9 +1048,43 @@ public class Resources {
                     .getMethod("integerArrayForId", int.class);
                 Object v = m.invoke(macapkResourceIndex, id);
                 if (v instanceof int[]) return (int[]) v;
+                // A typed <array> (not <integer-array>) is indexed with the
+                // string arrays, its items as written ("@color/dot"). AOSP's
+                // AssetManager.getResourceIntArray resolves each item and
+                // returns its data word, so a color reference answers the
+                // color and a literal answers its value.
+                java.lang.reflect.Method sm = macapkResourceIndex.getClass()
+                    .getMethod("stringArrayForId", int.class);
+                Object sv = sm.invoke(macapkResourceIndex, id);
+                if (sv instanceof String[] items) return macapkIntArrayOf(items);
             } catch (Throwable ignored) {}
         }
         return new int[0];
+    }
+
+    private int[] macapkIntArrayOf(String[] items) {
+        int[] out = new int[items.length];
+        for (int i = 0; i < items.length; i++) {
+            String it = items[i];
+            if (it == null || it.isEmpty()) continue;
+            try {
+                if (it.charAt(0) == '@') {
+                    int rid = macapkResRefToId(it);
+                    if (rid == 0) continue;
+                    android.util.TypedValue tv = new android.util.TypedValue();
+                    getValue(rid, tv, true);
+                    out[i] = tv.data;
+                } else if (it.charAt(0) == '#') {
+                    out[i] = android.graphics.Color.parseColor(it);
+                } else {
+                    out[i] = Integer.decode(it.trim());
+                }
+            } catch (Throwable ignored) {
+                // An item that does not resolve stays 0, as an unresolvable
+                // entry reads on a device.
+            }
+        }
+        return out;
     }
     /** AOSP `Resources.getStringArray(int)`. Returns the items of a
      *  `<string-array name="...">` from `res/values/arrays.xml`. Load-
