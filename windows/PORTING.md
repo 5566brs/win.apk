@@ -344,6 +344,12 @@ nobody has to find them again.
   `KeyFactory` fails over to the next provider, which ends at AndroidKeyStore
   again, so a bad spec was a `StackOverflowError` instead of an
   `InvalidKeySpecException` (Noice). Fixed here (listed in `README.md`).
+- `Context.getDatabasePath` took a name as absolute only when it starts with
+  the separator, and a Windows path starts with a drive. On Windows a database
+  opened by its full path (WorkManager's, To-Do List's) landed at
+  `databases\D:\...` and failed to open. Fixed with `File.isAbsolute()`
+  (listed in `README.md`). Wine did not show it; the sweep on a Windows runner
+  did.
 - Under Wine, a window needs an X display. `Xvfb :99` plus `xdotool` (clicks,
   keys) and ImageMagick's `import -window root` (screenshots) are enough to
   drive an app from a script.

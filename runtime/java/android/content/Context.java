@@ -988,8 +988,11 @@ public abstract class Context {
      *  re-reads the WorkSpec by id after enqueue). */
     public File getDatabasePath(String name) {
         if (name == null) name = "default.db";
-        // AOSP behavior: absolute-path names are returned verbatim.
-        if (name.length() > 0 && name.charAt(0) == java.io.File.separatorChar) {
+        // AOSP behavior: absolute-path names are returned verbatim. On
+        // Windows an absolute path starts with a drive ("C:\\..."), not the
+        // separator, so ask File as well.
+        if (name.length() > 0 && (name.charAt(0) == java.io.File.separatorChar
+                || new File(name).isAbsolute())) {
             File f = new File(name);
             File parent = f.getParentFile();
             if (parent != null && !parent.exists()) parent.mkdirs();

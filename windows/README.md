@@ -137,6 +137,9 @@ Windows hook is unavoidable, and every such change is listed here:
 - `runtime/java/android/security/keystore/AndroidKeyStoreKeyFactorySpi.java`:
   delegates to the other providers only, instead of recursing into itself
   until the stack overflows. Not Windows-specific.
+- `runtime/java/android/content/Context.java`: `getDatabasePath` also takes a
+  drive-letter path as absolute, so a database named by its full path is not
+  nested inside `databases\`.
 
 ## License
 
