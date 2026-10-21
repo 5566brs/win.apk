@@ -5,7 +5,9 @@
 #include "winapk/elf_tls.h"
 #include "winapk/guest_abi.h"
 
+#include <atomic>
 #include <cerrno>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -27,8 +29,84 @@ namespace {
 // what guest code compiled for Android assumes.
 WINAPK_GUEST_ABI void* g_malloc(size_t n) { return std::malloc(n); }
 WINAPK_GUEST_ABI void* g_calloc(size_t n, size_t sz) { return std::calloc(n, sz); }
-WINAPK_GUEST_ABI void* g_realloc(void* p, size_t n) { return std::realloc(p, n); }
-WINAPK_GUEST_ABI void g_free(void* p) { std::free(p); }
+
+// Over-aligned blocks (posix_memalign / memalign / aligned_alloc above 16).
+// The guest frees them with plain free(), so each is carved out of a larger
+// malloc block and remembered: free and realloc look the pointer up first.
+// The count keeps that lookup off the common path while there are none.
+struct AlignedBlock {
+    void* base;
+    size_t size;
+};
+std::mutex g_aligned_lock;
+std::unordered_map<void*, AlignedBlock> g_aligned;
+std::atomic<size_t> g_aligned_count{0};
+
+void* aligned_block(size_t align, size_t n) {
+    if (align <= 16) return std::malloc(n ? n : 1);
+    void* base = std::malloc(n + align);
+    if (!base) return nullptr;
+    // Strictly above base, so an aligned pointer is never a plain block.
+    auto* p = reinterpret_cast<void*>((reinterpret_cast<uintptr_t>(base) + align) & ~(uintptr_t{align} - 1));
+    std::lock_guard<std::mutex> hold(g_aligned_lock);
+    g_aligned[p] = {base, n};
+    g_aligned_count.fetch_add(1, std::memory_order_relaxed);
+    return p;
+}
+
+// Takes `p` out of the aligned registry; false when it is a plain block.
+bool take_aligned(void* p, AlignedBlock* out) {
+    if (g_aligned_count.load(std::memory_order_relaxed) == 0) return false;
+    std::lock_guard<std::mutex> hold(g_aligned_lock);
+    auto it = g_aligned.find(p);
+    if (it == g_aligned.end()) return false;
+    *out = it->second;
+    g_aligned.erase(it);
+    g_aligned_count.fetch_sub(1, std::memory_order_relaxed);
+    return true;
+}
+
+WINAPK_GUEST_ABI void* g_realloc(void* p, size_t n) {
+    AlignedBlock b;
+    if (p && take_aligned(p, &b)) {
+        void* q = std::malloc(n ? n : 1);
+        if (q) std::memcpy(q, p, b.size < n ? b.size : n);
+        std::free(b.base);
+        return q;
+    }
+    return std::realloc(p, n);
+}
+WINAPK_GUEST_ABI void g_free(void* p) {
+    AlignedBlock b;
+    if (p && take_aligned(p, &b)) {
+        std::free(b.base);
+        return;
+    }
+    std::free(p);
+}
+
+bool valid_alignment(size_t a) { return a != 0 && (a & (a - 1)) == 0; }
+
+WINAPK_GUEST_ABI int g_posix_memalign(void** out, size_t align, size_t n) {
+    if (!out) return EINVAL;
+    if (!valid_alignment(align) || align % sizeof(void*) != 0) return 22;  // Linux EINVAL
+    void* p = aligned_block(align, n);
+    if (!p) return 12;  // Linux ENOMEM
+    *out = p;
+    return 0;
+}
+WINAPK_GUEST_ABI void* g_memalign(size_t align, size_t n) {
+    if (!valid_alignment(align)) {
+        size_t a = 16;
+        while (a < align) a <<= 1;
+        align = a;
+    }
+    return aligned_block(align, n);
+}
+WINAPK_GUEST_ABI void* g_aligned_alloc(size_t align, size_t n) {
+    return valid_alignment(align) ? aligned_block(align, n) : nullptr;
+}
+WINAPK_GUEST_ABI void* g_valloc(size_t n) { return aligned_block(4096, n); }
 
 // ---- string / memory routines --------------------------------------------
 WINAPK_GUEST_ABI void* g_memcpy(void* d, const void* s, size_t n) { return std::memcpy(d, s, n); }
@@ -121,6 +199,11 @@ const ShimSymbol kSymbols[] = {
     WINAPK_SHIM("calloc", g_calloc),
     WINAPK_SHIM("realloc", g_realloc),
     WINAPK_SHIM("free", g_free),
+    WINAPK_SHIM("posix_memalign", g_posix_memalign),
+    WINAPK_SHIM("memalign", g_memalign),
+    WINAPK_SHIM("aligned_alloc", g_aligned_alloc),
+    WINAPK_SHIM("valloc", g_valloc),
+    WINAPK_SHIM("pvalloc", g_valloc),
     WINAPK_SHIM("memcpy", g_memcpy),
     WINAPK_SHIM("memmove", g_memmove),
     WINAPK_SHIM("memset", g_memset),
