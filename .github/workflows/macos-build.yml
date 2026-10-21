@@ -1,8 +1,14 @@
-name: macOS build (fork CI)
+name: Mac.apk build (fork CI)
 
-# Builds Mac.apk on a GitHub-hosted Apple Silicon runner (macOS 26), to check
-# framework changes before they are offered upstream. Run it by hand:
+# Builds Mac.apk to check framework changes before they are offered upstream.
+# Run it by hand:
 #   gh workflow run macos-build.yml -R 5566brs/win.apk -f repo=kksimp/Mac.apk -f ref=main
+#
+# The java job compiles the whole Java tree (framework, loader, DEX converter)
+# with debug/build_java_only.sh on Linux, where runners are always free. The
+# macos job runs the full build on Apple Silicon (macOS 26, which Mac.apk
+# requires); GitHub's arm64 Mac pool is often short of capacity, so it is
+# optional (-f macos=false skips it).
 on:
   workflow_dispatch:
     inputs:
@@ -14,9 +20,41 @@ on:
         description: Branch, tag or SHA
         required: true
         default: main
+      macos:
+        description: Also run the full build on macOS 26
+        type: boolean
+        default: true
 
 jobs:
-  build:
+  java:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repo }}
+          ref: ${{ inputs.ref }}
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Java framework, loader and DEX converter
+        env:
+          MACAPK_JAVA_NOLOCK: '1'
+        run: debug/build_java_only.sh 2>&1 | tee java-build.log
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: java-build-log
+          path: java-build.log
+          if-no-files-found: ignore
+
+  macos:
+    if: ${{ inputs.macos }}
     runs-on: macos-26
     timeout-minutes: 300
     steps:
