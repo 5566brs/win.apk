@@ -233,6 +233,26 @@ struct BootArgs {
     int result = 1;
 };
 
+// The display density, as upstream derives it from the Mac screen's point
+// scale (Retina 2x = 320 dpi): Windows' scale for the main monitor x 160, so
+// 100% is 160 (mdpi), 150% is 240 (hdpi), 200% is 320 (xhdpi). The app then
+// draws at exactly the window's pixel size and nothing is stretched or shrunk.
+// Headless runs (tests, CI) keep upstream's 320 so their frames stay 720x1280;
+// WINAPK_DENSITY (a dpi) overrides both.
+int display_density_dpi() {
+    const std::wstring forced = env_var(L"WINAPK_DENSITY");
+    if (!forced.empty()) return _wtoi(forced.c_str());
+    if (!env_var(L"WINAPK_HEADLESS").empty()) return 320;
+    using DpiAwareFn = BOOL(WINAPI*)(HANDLE);
+    using SystemDpiFn = UINT(WINAPI*)();
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    auto aware = reinterpret_cast<DpiAwareFn>(GetProcAddress(user32, "SetProcessDpiAwarenessContext"));
+    auto system_dpi = reinterpret_cast<SystemDpiFn>(GetProcAddress(user32, "GetDpiForSystem"));
+    if (aware) aware(reinterpret_cast<HANDLE>(-4));  // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+    const UINT dpi = system_dpi ? system_dpi() : 96;
+    return std::clamp(static_cast<int>(dpi * 160 / 96), 120, 640);
+}
+
 std::vector<std::string> jvm_options(const BootArgs& b) {
     const Options& o = b.options;
     std::error_code ec;
@@ -270,6 +290,7 @@ std::vector<std::string> jvm_options(const BootArgs& b) {
     // Guest code's "/data/...", "/sdcard/..." resolve under the same folder.
     winapk::set_android_root(utf8(android_root.wstring()).c_str());
     v.push_back("-Dmacapk.bundle.apk=" + jvm_path(o.apk));
+    v.push_back("-Dmacapk.display.density=" + std::to_string(display_density_dpi()));
     v.push_back("-XX:ErrorFile=" + jvm_path(logs) + "\\hs_err_pid%p.log");
     // Extra options, space-separated, as upstream reads them.
     const std::string extra = utf8(env_var(L"MACAPK_JVM_OPTS"));
@@ -391,6 +412,15 @@ int wmain(int argc, wchar_t** argv) {
         return 2;
     }
     if (!resolve_paths(&b.options)) return 2;
+
+    // "All files access" (MANAGE_EXTERNAL_STORAGE) is granted on the Mac by
+    // macapk-installhelper's consent dialog, which signs the answer into a
+    // store SpecialAccessStore reads. Windows has no such helper yet, so a
+    // grant could never be given and apps that need it (AnkiDroid) stop at
+    // their permission screen. Until it exists, every app holds the access,
+    // which is upstream's own answer before that helper (the switch below);
+    // shared storage here is a folder of the user's own under the data dir.
+    if (env_var(L"MACAPK_ALLFILES_HONEST").empty()) SetEnvironmentVariableW(L"MACAPK_ALLFILES_HONEST", L"0");
 
     std::error_code ec;
     b.app_dir = b.options.data / "apps" / b.options.apk.stem();

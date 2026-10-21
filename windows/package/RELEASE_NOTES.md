@@ -6,7 +6,7 @@ A pre-release for testing: Win.apk runs Android apps on Windows 10/11 x64.
 - **Included:** Java and ANGLE. `README.txt` has the details.
 
 ## What works
-- **Java/Kotlin apps:** each opens in its own window, with mouse, wheel and keyboard input. Escape is Back.
+- **Java/Kotlin apps:** each opens in its own window, with mouse, wheel and keyboard input. Back is Escape, Alt+Left or the mouse's back button.
 - **OpenGL ES:** works from Java (`GLSurfaceView`, libGDX) and from an app's native code through a SurfaceView (SDL games). It runs on ANGLE (Direct3D 11), falling back to WARP or SwiftShader without a GPU.
 - **Native libraries:** apps that ship `lib/x86_64` libraries load them natively.
 - **Sound from Java:** AudioTrack and SoundPool, for WAV, Ogg and MP3.

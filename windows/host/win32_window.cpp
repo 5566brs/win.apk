@@ -226,12 +226,26 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_KEYDOWN:
         case WM_SYSKEYDOWN:
             if (msg == WM_SYSKEYDOWN && wp == VK_F4) break;  // Alt+F4 closes, as everywhere
+            // Alt+Left is Back, as in a browser (Escape is Back too).
+            if (msg == WM_SYSKEYDOWN && wp == VK_LEFT) {
+                g_input->key(0, 4, 0, 0);
+                return 0;
+            }
             send_key(0, wp, lp);
             return 0;
         case WM_KEYUP:
         case WM_SYSKEYUP:
+            if (msg == WM_SYSKEYUP && wp == VK_LEFT) {
+                g_input->key(1, 4, 0, 0);
+                return 0;
+            }
             send_key(1, wp, lp);
             return 0;
+        // The mouse's back side button is Back too.
+        case WM_XBUTTONDOWN:
+        case WM_XBUTTONUP:
+            if (GET_XBUTTON_WPARAM(wp) == XBUTTON1) g_input->key(msg == WM_XBUTTONDOWN ? 0 : 1, 4, 0, 0);
+            return TRUE;
         case WM_CHAR:
         case WM_SYSCHAR:
             return 0;  // characters already went out with the key-down

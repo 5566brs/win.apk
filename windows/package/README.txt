@@ -7,7 +7,8 @@ Android apps as ordinary Windows programs on Windows 10/11 x64.
 What works
 ----------
 - Apps written in Java or Kotlin. They open in their own window and respond
-  to the mouse, the mouse wheel and the keyboard. Escape is Android's Back.
+  to the mouse, the mouse wheel and the keyboard. Escape (or Alt+Left, or
+  the mouse's back button) is Android's Back.
 - Games and apps that draw with OpenGL ES, from Java (GLSurfaceView, libGDX)
   or from their own native code through a SurfaceView (SDL games). Graphics
   go through ANGLE on Direct3D 11; without a usable GPU, a software renderer
@@ -42,8 +43,8 @@ Open Win.apk: it shows your app library.
 - Double-click an app to open it. Right-click for more: a new desktop
   shortcut, the last log, or removing the app.
 
-In an app, the mouse is your finger, the wheel scrolls, and Escape is
-Android's Back. Close the app's window to quit. Apps from F-Droid
+In an app, the mouse is your finger and the wheel scrolls. Android's Back
+is Escape, Alt+Left, or the mouse's back side button. Close the app's window to quit. Apps from F-Droid
 (f-droid.org) are a good place to start: they are free, open source, and
 usually Java-only.
 
