@@ -1,4 +1,5 @@
 name: Mac.apk build (fork CI)
+run-name: "Mac.apk build ${{ inputs.repo }}@${{ inputs.ref }}"
 
 # Builds Mac.apk to check framework changes before they are offered upstream.
 # Run it by hand:
