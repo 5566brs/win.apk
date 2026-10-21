@@ -266,7 +266,10 @@ jobs:
           lines=$(wc -l < "$out/app.log" | tr -d ' ')
           shots=$(ls "$out"/screen-*.png 2>/dev/null | wc -l | tr -d ' ')
           wshots=$(ls "$out"/window-*.png 2>/dev/null | wc -l | tr -d ' ')
-          problems="$(grep -n -m 12 -E 'FATAL|Exception|SIGSEGV|SIGBUS|SIGABRT|hs_err|Abort trap' "$out/app.log")"
+          # Exceptions the app threw, error-level lines and fatal signals. Plain
+          # "Exception" would also match the runtime's routine class probes
+          # (ClassNotFoundException for pairip, Compose and AppCompat lookups).
+          problems="$(grep -n -m 12 -E 'FATAL|threw|[Uu]ncaught|Exception in thread|^\[E\]|SIGSEGV|SIGBUS|SIGABRT|SIGILL|hs_err|Abort trap' "$out/app.log")"
           fail=""
           [ "$alive" = 1 ] || fail="the runtime exited by itself after about ${now}s (status $rc)"
           [ -n "$first_win" ] || fail="${fail:+$fail; }no window appeared"
@@ -289,7 +292,7 @@ jobs:
             echo "- Screenshots: $shots of the screen, $wshots of the app window (artifact app-smoke)"
             echo "- Run log: $lines lines"
             echo
-            echo "First FATAL / exception lines:"
+            echo "First FATAL, error and thrown-exception lines:"
             echo
             echo '```'
             echo "${problems:-(none)}"
