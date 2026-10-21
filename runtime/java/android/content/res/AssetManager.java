@@ -279,9 +279,18 @@ public final class AssetManager implements AutoCloseable {
         Found(ZipFile z, ZipEntry e) { this.zip = z; this.entry = e; }
     }
 
+    /** An asset path as APK entries spell it. Windows: java.io.File joins
+     *  path segments with a backslash, and engines that build asset paths
+     *  with File (libGDX's FileHandle) hand those to open(); on a device the
+     *  separator is '/', which is also the only one zip entries use. */
+    private static String macapkEntryPath(String path) {
+        return path == null ? null : path.replace('\\', '/');
+    }
+
     /** Resolve a full zip-relative path across the mounts in AOSP's REVERSE
      *  order, so the app shadows the framework. null when nothing has it. */
     private Found macapkFind(String zipPath) {
+        zipPath = macapkEntryPath(zipPath);
         ZipFile[] mounts = mApkAssets;
         for (int i = mounts.length - 1; i >= 0; i--) {
             ZipFile z = mounts[i];
@@ -296,6 +305,7 @@ public final class AssetManager implements AutoCloseable {
      *  ApkAssets[]; cookie 0 means "any", which is the reverse-order search. */
     private Found macapkFind(int cookie, String zipPath) {
         if (cookie <= 0) return macapkFind(zipPath);
+        zipPath = macapkEntryPath(zipPath);
         ZipFile[] mounts = mApkAssets;
         if (cookie > mounts.length) return null;
         ZipFile z = mounts[cookie - 1];
@@ -507,7 +517,7 @@ public final class AssetManager implements AutoCloseable {
      *  an app cannot depend on our old insertion order without already being
      *  broken on a device. */
     public String[] list(String path) throws IOException {
-        String prefix = "assets/" + (path == null ? "" : path);
+        String prefix = "assets/" + (path == null ? "" : macapkEntryPath(path));
         if (!prefix.endsWith("/")) prefix += "/";
         java.util.TreeSet<String> out = new java.util.TreeSet<>();
         ZipFile[] mounts = mApkAssets;

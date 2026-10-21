@@ -29,6 +29,7 @@ __pycache__/
 
 # Large or machine-local dependencies, fetched or built by the scripts
 thirdparty/angle/
+thirdparty/angle-win/
 thirdparty/depot_tools/
 thirdparty/MoltenVK-build/
 thirdparty/framework-res/

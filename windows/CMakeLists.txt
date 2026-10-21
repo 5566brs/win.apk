@@ -152,12 +152,38 @@ if(WINAPK_JNI_INCLUDE)
                         ole32 mfplat mfreadwrite mfuuid shlwapi advapi32 shell32 uuid)
   target_include_directories(winapk-runtime PRIVATE ${WINAPK_WEBP_DIR}/src)
   target_compile_options(winapk-runtime PRIVATE -Wall -Wextra)
+  # GL (M6): upstream's android.opengl bindings, cut out of its Mac
+  # native_methods.cpp at build time and compiled against the Khronos headers;
+  # ANGLE is loaded at run time (host/gl/gl_loader.h).
+  set(WINAPK_GL_UPSTREAM ${CMAKE_BINARY_DIR}/gl/gl_upstream.inc)
+  add_custom_command(
+    OUTPUT ${WINAPK_GL_UPSTREAM}
+    COMMAND ${CMAKE_COMMAND} -DUPSTREAM=${CMAKE_CURRENT_SOURCE_DIR}/../runtime/src/native_methods.cpp
+            -DOUT=${WINAPK_GL_UPSTREAM} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/extract_gl_bridges.cmake
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/src/native_methods.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/cmake/extract_gl_bridges.cmake
+    COMMENT "Extracting upstream's GL bindings")
+  target_sources(winapk-runtime PRIVATE host/gl/gl_loader.cpp host/gl/gl_stubs.cpp host/gl/gl_bridges.cpp
+                 host/gl/gl_surface.cpp
+                 ${WINAPK_GL_UPSTREAM})
+  target_include_directories(winapk-runtime PRIVATE host third_party/khronos ${CMAKE_BINARY_DIR}/gl
+                             ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/src)
+  target_compile_definitions(winapk-runtime PRIVATE KHRONOS_STATIC GL_GLEXT_PROTOTYPES=0)
+  # Upstream's code, upstream's warnings.
+  set_source_files_properties(host/gl/gl_bridges.cpp PROPERTIES COMPILE_OPTIONS "-w")
   # Upstream's NativeSqlite bridge, compiled unchanged: compat/ supplies the
   # few CoreFoundation string calls it makes. Upstream's warnings are not ours.
   target_sources(winapk-runtime PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/src/native_sqlite.cpp)
   target_include_directories(winapk-runtime PRIVATE compat)
   set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/../runtime/src/native_sqlite.cpp
                               PROPERTIES COMPILE_OPTIONS "-w")
+
+  # The runtime's GL on ANGLE (test/gl_test.cpp), on whatever backend the
+  # machine has.
+  add_executable(winapk-gl-test test/gl_test.cpp host/gl/gl_surface.cpp host/gl/gl_loader.cpp host/gl/gl_stubs.cpp)
+  target_include_directories(winapk-gl-test PRIVATE host third_party/khronos)
+  target_compile_definitions(winapk-gl-test PRIVATE KHRONOS_STATIC)
+  target_link_options(winapk-gl-test PRIVATE -static)
 
   # NativeAudio's backend on its own (test/audio_test.cpp).
   add_executable(winapk-audio-test test/audio_test.cpp host/audio_engine.cpp host/audio_decode.cpp)

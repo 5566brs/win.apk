@@ -89,8 +89,9 @@ runtime/bin/winapk-runtime.exe --apk app.apk --jdk "$JAVA_HOME"
 `--apk` also takes a split bundle (`.apkm`, `.xapk` or `.apks`), installed once
 as `base.apk` plus `split_*.apk` under `%LOCALAPPDATA%\Win.apk\app`. The app
 opens in its own window, with its own icon, and takes mouse, wheel and keyboard input
-(Escape is Android's Back). Java-only apps work this way; OpenGL apps and games
-do not render yet. App data goes to `%LOCALAPPDATA%\Win.apk`.
+(Escape is Android's Back). Java-only apps work this way, including OpenGL
+from Java (`GLSurfaceView`, libGDX) on ANGLE; apps that draw with OpenGL from
+their own native code do not render yet. App data goes to `%LOCALAPPDATA%\Win.apk`.
 
 For tests, `WINAPK_HEADLESS=1` runs without a window,
 `WINAPK_HEADLESS_FRAME=frame.bmp` saves the last frame the app drew, and

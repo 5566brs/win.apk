@@ -3,6 +3,7 @@
 #
 #   <out>/bin/winapk-runtime.exe
 #   <out>/bin/macapk-translator.exe, winapk-guest-stub.dll (app native libraries)
+#   <out>/bin/libEGL.dll, libGLESv2.dll, ... (ANGLE, for GL; fetch_angle.sh)
 #   <out>/bin/tools/framework-res.apk
 #   <out>/lib/*.jar, java_base_patch/, jdk_unsupported_patch/
 #
@@ -23,5 +24,6 @@ OUT="$(cd -- "$OUT" && pwd)"
 "$HERE/build_java.sh" "$OUT"
 "$HERE/build_framework_res.sh" "$OUT/bin/tools/framework-res.apk"
 cp -f "$BUILD/winapk-runtime.exe" "$BUILD/macapk-translator.exe" "$BUILD/winapk-guest-stub.dll" "$OUT/bin/"
+"$HERE/fetch_angle.sh" "$OUT/bin"
 rm -rf "$OUT/.build"  # build_java.sh's scratch, not part of the runtime
 echo "[stage] runtime staged in $OUT"

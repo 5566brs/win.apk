@@ -170,6 +170,9 @@ public class GLSurfaceView extends SurfaceView
      *  Read and written only by its own thread, so outside pauseLock. */
     private final ThreadLocal<int[]> myRendererCalls = new ThreadLocal<>();
 
+    /** Whether a lifecycle delivery failure's cause chain was logged yet. */
+    private boolean lifecycleCauseLogged;
+
     /** For the offline gate (debug/geh_andengine-lock-shadow_gate.sh). */
     public static boolean macapkPauseContractEnabled() { return GLSV_PAUSE; }
 
@@ -335,6 +338,17 @@ public class GLSurfaceView extends SurfaceView
             }
         } catch (Throwable t) {
             NativeLog.e("GLSurfaceView", "lifecycle delivery threw: " + t);
+            // The cause chain once: a renderer that throws every frame would
+            // otherwise only ever show its outermost message.
+            if (!lifecycleCauseLogged) {
+                lifecycleCauseLogged = true;
+                for (Throwable c = t.getCause(); c != null; c = c.getCause()) {
+                    NativeLog.e("GLSurfaceView", "  caused by: " + c);
+                }
+                java.io.StringWriter sw = new java.io.StringWriter();
+                t.printStackTrace(new java.io.PrintWriter(sw));
+                NativeLog.e("GLSurfaceView", sw.toString());
+            }
         }
         return true;
     }

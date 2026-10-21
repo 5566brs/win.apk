@@ -47,6 +47,7 @@ HostMethods native_gamepad_methods();   // native_gamepad.cpp
 HostMethods native_icu_methods();       // native_icu.cpp
 HostMethods native_audio_input_methods(); // native_audio_input.cpp
 HostMethods native_photos_methods();    // native_photos.cpp
+HostMethods native_gl_methods();        // gl/gl_bridges.cpp
 
 // The app's directory under the data directory, where Boot renders the
 // launcher icon (icon.png) that becomes the window's icon. native_cocoa.cpp.

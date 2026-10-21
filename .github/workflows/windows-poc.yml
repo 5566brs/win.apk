@@ -98,10 +98,21 @@ jobs:
         with:
           path: thirdparty/framework-res
           key: framework-res-v2-${{ hashFiles('scripts/build_framework_res.sh', 'windows/scripts/build_framework_res.sh') }}
+      - uses: actions/cache@v4
+        with:
+          path: thirdparty/angle-win
+          key: angle-${{ hashFiles('windows/scripts/fetch_angle.sh') }}
       - name: Stage the runtime
         run: |
           export JAVA_HOME="$(cygpath -u "$JAVA_HOME")"
           windows/scripts/stage_runtime.sh build runtime
+      - name: Run the GL test
+        run: |
+          # It needs ANGLE next to it, which staging just put in runtime/bin.
+          # The runner has no GPU, so ANGLE falls back to WARP or SwiftShader.
+          cp build/winapk-gl-test.exe runtime/bin/
+          ./runtime/bin/winapk-gl-test.exe
+          rm runtime/bin/winapk-gl-test.exe
       - name: Boot an APK headless
         run: |
           # F-Droid moves old versions to its archive, so try both.

@@ -54,6 +54,10 @@ jobs:
         with:
           path: apk-cache
           key: compat-apks-${{ hashFiles('windows/test/compat/apps.txt') }}
+      - uses: actions/cache@v4
+        with:
+          path: thirdparty/angle-win
+          key: angle-${{ hashFiles('windows/scripts/fetch_angle.sh') }}
       - name: Build and stage the runtime
         run: |
           cmake -S windows -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++ \

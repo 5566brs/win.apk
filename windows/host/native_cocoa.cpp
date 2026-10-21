@@ -24,12 +24,16 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <mutex>
+#include <set>
+#include <vector>
 #include <string>
 
 #include <windows.h>
 #include <shellapi.h>
 
+#include "gl/gl_surface.h"
 #include "win32_window.h"
 #include "winapk/mini_bionic.h"
 
@@ -203,7 +207,17 @@ jintArray JNICALL Cocoa_activityWindowTransition(JNIEnv*, jclass, jstring, jint,
 // nothing to act on.
 void JNICALL Cocoa_setTopActivityConfigChanges(JNIEnv*, jclass, jint) {}
 void JNICALL Cocoa_setMaxAspectRatio(JNIEnv*, jclass, jfloat) {}
-void JNICALL Cocoa_setContentView(JNIEnv*, jclass, jlong, jlong) {}
+// The view a window shows. When it is a GL view (createMetalSurfaceViewForGl),
+// the window shows that view's GL frames and the Java UI comes as the overlay
+// layer; otherwise it shows what the view tree presents (presentBitmap).
+std::atomic<jlong> g_content_view{0};
+std::mutex g_gl_views_lock;
+std::set<jlong> g_gl_views;
+bool is_gl_view(jlong view) {
+    std::lock_guard<std::mutex> hold(g_gl_views_lock);
+    return g_gl_views.count(view) != 0;
+}
+void JNICALL Cocoa_setContentView(JNIEnv*, jclass, jlong, jlong view) { g_content_view = view; }
 void JNICALL Cocoa_closeWindow(JNIEnv*, jclass, jlong) {}
 
 // FLAG_SECURE: kept out of screenshots, recording and screen sharing.
@@ -259,8 +273,14 @@ void JNICALL Cocoa_showTranslationOverlay(JNIEnv*, jclass, jstring) {}
 void JNICALL Cocoa_updateTranslationOverlay(JNIEnv*, jclass, jstring) {}
 void JNICALL Cocoa_hideTranslationOverlay(JNIEnv*, jclass) {}
 
-// No GL render thread or GLSurfaceView yet (M6): nothing to tick or withhold.
-jboolean JNICALL Cocoa_beginWithheldTick(JNIEnv*, jclass, jboolean) { return JNI_FALSE; }
+// A RENDERMODE_WHEN_DIRTY GLSurfaceView with nothing to draw withholds the
+// tick: the pbuffer still holds the last frame, so the readback is skipped.
+// (Upstream may ask for a draw anyway for its self-capture; there is none.)
+thread_local bool t_tick_withheld = false;
+jboolean JNICALL Cocoa_beginWithheldTick(JNIEnv*, jclass, jboolean) {
+    t_tick_withheld = true;
+    return JNI_FALSE;
+}
 jboolean JNICALL Cocoa_hostRenderTick(JNIEnv*, jclass) { return JNI_FALSE; }
 
 void JNICALL Cocoa_showWindow(JNIEnv*, jclass, jlong) {
@@ -311,6 +331,12 @@ void JNICALL Cocoa_setWindowTitle(JNIEnv* env, jclass, jlong, jstring title) {
 
 jlong JNICALL Cocoa_createWindow(JNIEnv*, jclass, jstring) { return new_handle(); }
 jlong JNICALL Cocoa_createView(JNIEnv*, jclass, jint, jint) { return new_handle(); }
+jlong JNICALL Cocoa_createGlView(JNIEnv*, jclass, jint, jint) {
+    const jlong view = new_handle();
+    std::lock_guard<std::mutex> hold(g_gl_views_lock);
+    g_gl_views.insert(view);
+    return view;
+}
 jlong JNICALL Cocoa_getPlaceholderWindow(JNIEnv*, jclass) {
     static const jlong placeholder = new_handle();
     return placeholder;
@@ -318,10 +344,17 @@ jlong JNICALL Cocoa_getPlaceholderWindow(JNIEnv*, jclass) {
 
 // ---- the render tick ------------------------------------------------------
 
+// Every view with a renderer (MetalSurfaceCallbacks) is driven each tick:
+// the canvas views draw the view tree and present it themselves; a GL view
+// draws with ANGLE's context current on its pbuffer (gl_surface.h).
+struct Renderer {
+    jobject callbacks = nullptr;  // global ref
+    bool gl = false;
+    int announced_w = 0, announced_h = 0;
+};
 std::mutex g_renderer_lock;
-jobject g_renderer = nullptr;  // global ref to a MetalSurfaceCallbacks
-jlong g_renderer_view = 0;
-bool g_surface_announced = false;
+std::map<jlong, Renderer> g_renderers;
+std::vector<jlong> g_released_gl_views;  // pbuffers for the render thread to drop
 
 // The surface is the phone size in pixels, at the density the Java side uses
 // for the display metrics (DisplayConfig.seedFromCanvas).
@@ -343,6 +376,29 @@ bool check_tick_exception(JNIEnv* env) {
 
 void JNICALL Cocoa_exitProcess(JNIEnv*, jclass, jint code, jstring);
 
+void present_pixels(const uint32_t* argb, int w, int h);
+
+// One GL view's tick: ANGLE's context on its pbuffer, the renderer's
+// lifecycle and frame, then the pixels for the window when it is the content.
+void gl_tick(JNIEnv* env, jlong view, Renderer& r, jobject callbacks, jmethodID changed, jmethodID draw,
+             int w, int h) {
+    const bool ready = gl_frame_begin(view, w, h);
+    if (r.announced_w != w || r.announced_h != h) {
+        r.announced_w = w;
+        r.announced_h = h;
+        env->CallVoidMethod(callbacks, changed, w, h);
+        check_tick_exception(env);
+    }
+    t_tick_withheld = false;
+    env->CallVoidMethod(callbacks, draw);
+    check_tick_exception(env);
+    static std::vector<uint32_t> pixels;
+    int fw = 0, fh = 0;
+    if (ready && !t_tick_withheld && view == g_content_view.load() && gl_frame_read(&pixels, &fw, &fh)) {
+        present_pixels(pixels.data(), fw, fh);
+    }
+}
+
 DWORD WINAPI render_thread(void*) {
     JNIEnv* env = nullptr;
     JavaVMAttachArgs args{JNI_VERSION_1_6, const_cast<char*>("winapk-render"), nullptr};
@@ -351,32 +407,54 @@ DWORD WINAPI render_thread(void*) {
     const char* e = std::getenv("WINAPK_HEADLESS_EXIT_AFTER_FRAMES");
     const long exit_after = (e && *e) ? std::atol(e) : 0L;
     long ticks_since_first = 0;
-    jmethodID changed = nullptr, draw = nullptr;
+    jclass cls = env->FindClass("com/macapk/loader/MetalSurfaceCallbacks");
+    const jmethodID changed = env->GetMethodID(cls, "macapkSurfaceChanged", "(II)V");
+    const jmethodID draw = env->GetMethodID(cls, "macapkDrawFrame", "()V");
+    env->DeleteLocalRef(cls);
     for (;;) {
         Sleep(16);
-        jobject renderer = nullptr;
-        bool announce = false;
+        const int w = static_cast<int>(g_phone_w * density + 0.5f), h = static_cast<int>(g_phone_h * density + 0.5f);
+        std::vector<std::pair<jlong, jobject>> now;
+        std::vector<jlong> dropped;
         {
             std::lock_guard<std::mutex> hold(g_renderer_lock);
-            if (!g_renderer) continue;
-            renderer = env->NewLocalRef(g_renderer);
-            announce = !g_surface_announced;
-            g_surface_announced = true;
+            for (auto& [view, r] : g_renderers) now.emplace_back(view, env->NewLocalRef(r.callbacks));
+            dropped.swap(g_released_gl_views);
         }
-        if (!changed) {
-            jclass cls = env->FindClass("com/macapk/loader/MetalSurfaceCallbacks");
-            changed = env->GetMethodID(cls, "macapkSurfaceChanged", "(II)V");
-            draw = env->GetMethodID(cls, "macapkDrawFrame", "()V");
-            env->DeleteLocalRef(cls);
+        for (jlong view : dropped) gl_view_release(view);
+        for (auto& [view, callbacks] : now) {
+            Renderer r;
+            {
+                std::lock_guard<std::mutex> hold(g_renderer_lock);
+                auto it = g_renderers.find(view);
+                if (it == g_renderers.end()) {
+                    env->DeleteLocalRef(callbacks);
+                    continue;
+                }
+                r = it->second;
+            }
+            if (r.gl) {
+                gl_tick(env, view, r, callbacks, changed, draw, w, h);
+            } else {
+                if (r.announced_w != w || r.announced_h != h) {
+                    r.announced_w = w;
+                    r.announced_h = h;
+                    env->CallVoidMethod(callbacks, changed, w, h);
+                    check_tick_exception(env);
+                }
+                env->CallVoidMethod(callbacks, draw);
+                check_tick_exception(env);
+            }
+            {
+                std::lock_guard<std::mutex> hold(g_renderer_lock);
+                auto it = g_renderers.find(view);
+                if (it != g_renderers.end() && it->second.callbacks == r.callbacks) {
+                    it->second.announced_w = r.announced_w;
+                    it->second.announced_h = r.announced_h;
+                }
+            }
+            env->DeleteLocalRef(callbacks);
         }
-        if (announce) {
-            env->CallVoidMethod(renderer, changed, static_cast<jint>(g_phone_w * density + 0.5f),
-                                static_cast<jint>(g_phone_h * density + 0.5f));
-            check_tick_exception(env);
-        }
-        env->CallVoidMethod(renderer, draw);
-        check_tick_exception(env);
-        env->DeleteLocalRef(renderer);
         if (exit_after > 0 && g_frames > 0 && ++ticks_since_first >= exit_after) {
             std::fprintf(stderr,
                          "[win.apk] %ld frames presented in %ld display frames; exiting as "
@@ -390,11 +468,17 @@ DWORD WINAPI render_thread(void*) {
 void JNICALL Cocoa_setRenderer(JNIEnv* env, jclass, jlong view, jobject callbacks) {
     static bool started = false;
     std::lock_guard<std::mutex> hold(g_renderer_lock);
-    if (g_renderer) env->DeleteGlobalRef(g_renderer);
-    g_renderer = callbacks ? env->NewGlobalRef(callbacks) : nullptr;
-    g_renderer_view = view;
-    g_surface_announced = false;
-    if (!started && g_renderer) {
+    auto it = g_renderers.find(view);
+    if (it != g_renderers.end()) {
+        env->DeleteGlobalRef(it->second.callbacks);
+        g_renderers.erase(it);
+    }
+    if (!callbacks) return;
+    Renderer r;
+    r.callbacks = env->NewGlobalRef(callbacks);
+    r.gl = is_gl_view(view);
+    g_renderers[view] = r;
+    if (!started) {
         started = true;
         env->GetJavaVM(&g_vm);
         HANDLE t = CreateThread(nullptr, 16 * 1024 * 1024, render_thread, nullptr,
@@ -405,10 +489,11 @@ void JNICALL Cocoa_setRenderer(JNIEnv* env, jclass, jlong view, jobject callback
 
 void JNICALL Cocoa_releaseRenderer(JNIEnv* env, jclass, jlong view) {
     std::lock_guard<std::mutex> hold(g_renderer_lock);
-    if (g_renderer && view == g_renderer_view) {
-        env->DeleteGlobalRef(g_renderer);
-        g_renderer = nullptr;
-    }
+    auto it = g_renderers.find(view);
+    if (it == g_renderers.end()) return;
+    if (it->second.gl) g_released_gl_views.push_back(view);
+    env->DeleteGlobalRef(it->second.callbacks);
+    g_renderers.erase(it);
 }
 
 // Upstream hands the boot thread to [NSApp run] here. Headless, there is
@@ -455,10 +540,12 @@ bool write_bmp(const wchar_t* path, const jint* argb, int w, int h) {
     return ok && MoveFileExW(tmp.c_str(), path, MOVEFILE_REPLACE_EXISTING);
 }
 
-void JNICALL Cocoa_presentBitmap(JNIEnv* env, jclass, jintArray argb, jint w, jint h) {
+// A frame for the window (and for WINAPK_HEADLESS_FRAME): from the view tree,
+// or from the content GL view (gl_tick).
+void present_pixels(const uint32_t* argb, int w, int h) {
     const long frame = ++g_frames;
     if (frame == 1) {
-        std::fprintf(stderr, "[win.apk] first frame presented (%dx%d)\n", static_cast<int>(w), static_cast<int>(h));
+        std::fprintf(stderr, "[win.apk] first frame presented (%dx%d)\n", w, h);
         std::fflush(stderr);
     }
     static const std::wstring path = [] {
@@ -466,17 +553,23 @@ void JNICALL Cocoa_presentBitmap(JNIEnv* env, jclass, jintArray argb, jint w, ji
         const DWORD n = GetEnvironmentVariableW(L"WINAPK_HEADLESS_FRAME", buf, MAX_PATH * 4);
         return (n > 0 && n < MAX_PATH * 4) ? std::wstring(buf, n) : std::wstring();
     }();
-    if (!argb || w <= 0 || h <= 0 || env->GetArrayLength(argb) < w * h) return;
-    if (path.empty() && !window_running()) return;
-    jint* px = env->GetIntArrayElements(argb, nullptr);
-    if (!px) return;
     // An ARGB int is B, G, R, A in memory: the byte order of a 32-bit DIB.
-    window_present(reinterpret_cast<const uint32_t*>(px), w, h);
+    window_present(argb, w, h);
     if (!path.empty()) {
         static std::mutex lock;
         std::lock_guard<std::mutex> hold(lock);
-        write_bmp(path.c_str(), px, w, h);
+        write_bmp(path.c_str(), reinterpret_cast<const jint*>(argb), w, h);
     }
+}
+
+// The view tree's frame. While a GL view is the window's content the view
+// tree reaches the window as the overlay layer instead (presentOverlayBitmap).
+void JNICALL Cocoa_presentBitmap(JNIEnv* env, jclass, jintArray argb, jint w, jint h) {
+    if (!argb || w <= 0 || h <= 0 || env->GetArrayLength(argb) < w * h) return;
+    if (is_gl_view(g_content_view.load())) return;
+    jint* px = env->GetIntArrayElements(argb, nullptr);
+    if (!px) return;
+    present_pixels(reinterpret_cast<const uint32_t*>(px), w, h);
     env->ReleaseIntArrayElements(argb, px, JNI_ABORT);
 }
 
@@ -500,7 +593,7 @@ const HostMethod kMethods[] = {
     WINAPK_HOST_NATIVE(kCls, "applyRequestedOrientation", "(Z)V", Cocoa_applyRequestedOrientation),
     WINAPK_HOST_NATIVE(kCls, "createWindow", "(Ljava/lang/String;)J", Cocoa_createWindow),
     WINAPK_HOST_NATIVE(kCls, "createMetalSurfaceView", "(II)J", Cocoa_createView),
-    WINAPK_HOST_NATIVE(kCls, "createMetalSurfaceViewForGl", "(II)J", Cocoa_createView),
+    WINAPK_HOST_NATIVE(kCls, "createMetalSurfaceViewForGl", "(II)J", Cocoa_createGlView),
     WINAPK_HOST_NATIVE(kCls, "getPlaceholderWindow", "()J", Cocoa_getPlaceholderWindow),
     WINAPK_HOST_NATIVE(kCls, "runLoop", "()V", Cocoa_runLoop),
     WINAPK_HOST_NATIVE(kCls, "exitProcess", "(ILjava/lang/String;)V", Cocoa_exitProcess),

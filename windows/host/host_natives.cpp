@@ -93,6 +93,7 @@ const HostMethods kProviders[] = {
     native_icu_methods(),
     native_audio_input_methods(),
     native_photos_methods(),
+    native_gl_methods(),
 };
 
 const JNINativeMethod* implementation_of(const char* clazz, const char* name, const char* sig) {
