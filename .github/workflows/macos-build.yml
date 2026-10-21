@@ -9,6 +9,14 @@ name: Mac.apk build (fork CI)
 # macos job runs the full build on Apple Silicon (macOS 26, which Mac.apk
 # requires); GitHub's arm64 Mac pool is often short of capacity, so it is
 # optional (-f macos=false skips it).
+#
+# A green build does not show what a framework change does to a real app, so
+# the macos job then runs one open-source app from F-Droid with the runtime it
+# just built, screenshots it, and uploads the screenshots and the app's log as
+# the app-smoke artifact (-f app=false skips this; -f app_package="<package>
+# [versionCode]" picks another app). The run fails only when the runtime dies
+# at launch or never opens a window; how well the app draws is for a person to
+# judge from the screenshots.
 on:
   workflow_dispatch:
     inputs:
@@ -24,6 +32,18 @@ on:
         description: Also run the full build on macOS 26
         type: boolean
         default: true
+      app:
+        description: After the macOS build, run an F-Droid app and screenshot it
+        type: boolean
+        default: true
+      app_package:
+        description: 'F-Droid app to run: "<package> [versionCode]" (no versionCode: the version F-Droid suggests)'
+        required: false
+        default: org.billthefarmer.currency 158
+      app_seconds:
+        description: Seconds the app runs before the last screenshot
+        required: false
+        default: '90'
 
 # shell: bash makes GitHub run steps with -eo pipefail, so a failing build
 # piped through tee fails its step instead of showing green.
@@ -74,6 +94,8 @@ jobs:
           sw_vers
           uname -m
           xcode-select -p
+          # The GPU and display the app will draw on (a VM's paravirtual GPU).
+          system_profiler SPDisplaysDataType || true
 
       - name: Toolchain
         run: |
@@ -94,5 +116,198 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-log
-          path: build.log
+          path: |
+            build.log
+            runtime/build/framework-res-build.log
+          if-no-files-found: ignore
+
+      # ---- App smoke run ---------------------------------------------------
+      # F-Droid serves every current APK at /repo/<package>_<versionCode>.apk
+      # and moves retired ones to /archive/; the API names the suggested
+      # version when the input pins none.
+      - name: Fetch the app from F-Droid
+        if: ${{ inputs.app }}
+        env:
+          APP_PACKAGE: ${{ inputs.app_package }}
+        run: |
+          read -r pkg vc _ <<< "$APP_PACKAGE" || true
+          [[ "$pkg" =~ ^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$ ]] || { echo "::error::bad package name '$pkg'"; exit 1; }
+          if [ -z "${vc:-}" ]; then
+            vc="$(curl -fsSL --retry 3 "https://f-droid.org/api/v1/packages/$pkg" \
+                  | python3 -c 'import json, sys; print(json.load(sys.stdin)["suggestedVersionCode"])')"
+            echo "F-Droid suggests versionCode $vc of $pkg"
+          fi
+          [[ "$vc" =~ ^[0-9]+$ ]] || { echo "::error::bad versionCode '$vc'"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/apk"
+          apk="$RUNNER_TEMP/apk/${pkg}_${vc}.apk"
+          url=""
+          for dir in repo archive; do
+            if curl -fsSL --retry 3 -o "$apk" "https://f-droid.org/$dir/${pkg}_${vc}.apk"; then
+              url="https://f-droid.org/$dir/${pkg}_${vc}.apk"
+              break
+            fi
+          done
+          if [ -z "$url" ] || [ ! -s "$apk" ]; then
+            echo "::error::${pkg}_${vc}.apk is in neither F-Droid's repo nor its archive"
+            exit 1
+          fi
+          echo "Fetched $url ($(du -h "$apk" | cut -f1), sha256 $(shasum -a 256 "$apk" | cut -d' ' -f1))"
+          unzip -l "$apk" | awk '$4 ~ /^lib\// { print "  native library: " $4 }' | head -20
+          {
+            echo "APP_PKG=$pkg"
+            echo "APP_VC=$vc"
+            echo "APP_APK=$apk"
+            echo "APP_URL=$url"
+          } >> "$GITHUB_ENV"
+
+      # Launches the APK the way BUILDING.md documents for a build tree
+      # (runtime/build/bin/macapk-runtime --apk), with its own android root so
+      # the converted DEX and the app's data stay inside the run. The runner
+      # has a logged-in GUI session, so the window is real and screencapture
+      # sees it. Screenshots every 15 s cover the first-launch DEX conversion.
+      - name: Run the app
+        if: ${{ inputs.app }}
+        env:
+          APP_SECONDS: ${{ inputs.app_seconds }}
+        run: |
+          set +e
+          out="$PWD/smoke"
+          mkdir -p "$out"
+          secs="${APP_SECONDS:-90}"
+          [[ "$secs" =~ ^[0-9]+$ ]] || secs=90
+
+          # Lists windows with their owner pid and size. CGWindowList reports
+          # those without Screen Recording permission; only titles need it.
+          cat > "$RUNNER_TEMP/winlist.swift" <<'EOF'
+          import CoreGraphics
+          import Foundation
+
+          // winlist [pid ...]: id, pid, layer, onscreen, WxH, owner, title (tab-separated)
+          let pids = Set(CommandLine.arguments.dropFirst().compactMap { Int32($0) })
+          if pids.isEmpty {
+              print("# screen capture access: \(CGPreflightScreenCaptureAccess())")
+          }
+          let info = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? []
+          for w in info {
+              let pid = (w[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value ?? -1
+              if !pids.isEmpty && !pids.contains(pid) { continue }
+              let id = (w[kCGWindowNumber as String] as? NSNumber)?.intValue ?? 0
+              let layer = (w[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0
+              let onscreen = (w[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue ?? false
+              let owner = w[kCGWindowOwnerName as String] as? String ?? ""
+              let title = w[kCGWindowName as String] as? String ?? ""
+              var size = "0x0"
+              if let b = w[kCGWindowBounds as String] as? NSDictionary,
+                 let r = CGRect(dictionaryRepresentation: b as CFDictionary) {
+                  size = "\(Int(r.width))x\(Int(r.height))"
+              }
+              print("\(id)\t\(pid)\t\(layer)\t\(onscreen ? 1 : 0)\t\(size)\t\(owner)\t\(title)")
+          }
+          EOF
+          swiftc -O -o "$RUNNER_TEMP/winlist" "$RUNNER_TEMP/winlist.swift" || { echo "::error::winlist did not compile"; exit 1; }
+          "$RUNNER_TEMP/winlist" > "$out/windows-before.txt"
+          head -1 "$out/windows-before.txt"
+          screencapture -x "$out/screen-000s-before.png"
+
+          root="$RUNNER_TEMP/android-root"
+          mkdir -p "$root"
+          echo "Running $APP_PKG $APP_VC for ${secs}s"
+          t0=$(date +%s)
+          runtime/build/bin/macapk-runtime --apk "$APP_APK" --android-root "$root" > "$out/app.log" 2>&1 &
+          pid=$!
+
+          # Largest on-screen, normal-layer window owned by the runtime or a child.
+          app_window() {
+            "$RUNNER_TEMP/winlist" "$pid" $(pgrep -P "$pid") \
+              | awk -F'\t' '$3 == 0 && $4 == 1 { split($5, s, "x"); a = s[1] * s[2]; if (a > best) { best = a; line = $0 } } END { print line }'
+          }
+          shot() {
+            screencapture -x "$out/screen-$1.png"
+            [ -n "$wid" ] && screencapture -x -o -l "$wid" "$out/window-$1.png"
+          }
+          alive=1; first_win=""; win=""; wid=""; now=0; next_shot=15
+          while [ "$now" -lt "$secs" ]; do
+            sleep 5
+            now=$(( $(date +%s) - t0 ))
+            if ! kill -0 "$pid" 2>/dev/null; then alive=0; break; fi
+            w="$(app_window)"
+            if [ -n "$w" ]; then
+              win="$w"
+              wid="$(cut -f1 <<< "$w")"
+              if [ -z "$first_win" ]; then
+                first_win=$now
+                echo "First window after ${now}s: $w"
+              fi
+            fi
+            if [ "$now" -ge "$next_shot" ]; then
+              shot "$(printf '%03d' "$now")s"
+              next_shot=$(( next_shot + 15 ))
+            fi
+          done
+          if [ "$alive" = 1 ]; then
+            shot final
+            "$RUNNER_TEMP/winlist" > "$out/windows-after.txt"
+            kill -TERM "$pid"
+            for _ in $(seq 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+            kill -KILL "$pid" 2>/dev/null
+          fi
+          wait "$pid"; rc=$?
+          # Anything the runtime spawned (background DEX conversion, helpers).
+          pkill -KILL -f -- "$root" 2>/dev/null
+
+          # Crash evidence: JVM hs_err files and run logs, macOS crash reports.
+          [ -d "$HOME/Library/Logs/macapk" ] && cp -R "$HOME/Library/Logs/macapk" "$out/macapk-logs"
+          [ -d logs ] && cp -R logs "$out/repo-logs"
+          mkdir -p "$out/crash-reports"
+          find "$HOME/Library/Logs/DiagnosticReports" -type f -newer "$out/windows-before.txt" \
+            -exec cp {} "$out/crash-reports/" \; 2>/dev/null
+          (cd "$root" && find . -maxdepth 4 | sort | head -400) > "$out/android-root.txt"
+
+          lines=$(wc -l < "$out/app.log" | tr -d ' ')
+          shots=$(ls "$out"/screen-*.png 2>/dev/null | wc -l | tr -d ' ')
+          wshots=$(ls "$out"/window-*.png 2>/dev/null | wc -l | tr -d ' ')
+          problems="$(grep -n -m 12 -E 'FATAL|Exception|SIGSEGV|SIGBUS|SIGABRT|hs_err|Abort trap' "$out/app.log")"
+          fail=""
+          [ "$alive" = 1 ] || fail="the runtime exited by itself after about ${now}s (status $rc)"
+          [ -n "$first_win" ] || fail="${fail:+$fail; }no window appeared"
+          [ "$lines" -gt 0 ] || fail="${fail:+$fail; }the run log is empty"
+
+          {
+            echo "### App smoke run: $APP_PKG $APP_VC"
+            echo
+            echo "- APK: $APP_URL"
+            if [ "$alive" = 1 ]; then
+              echo "- Runtime: still running after ${secs}s, stopped by the workflow (exit status $rc)"
+            else
+              echo "- Runtime: **exited by itself after about ${now}s, status $rc**"
+            fi
+            if [ -n "$first_win" ]; then
+              echo "- Window: first seen after ${first_win}s; last seen: \`$win\`"
+            else
+              echo "- Window: **none**"
+            fi
+            echo "- Screenshots: $shots of the screen, $wshots of the app window (artifact app-smoke)"
+            echo "- Run log: $lines lines"
+            echo
+            echo "First FATAL / exception lines:"
+            echo
+            echo '```'
+            echo "${problems:-(none)}"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+          if [ -n "$fail" ]; then
+            echo "::error::App smoke run failed: $fail"
+            exit 1
+          fi
+
+      - name: Upload app run
+        if: ${{ always() && inputs.app }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-smoke
+          path: |
+            smoke/
+            build.log
+            runtime/build/framework-res-build.log
           if-no-files-found: ignore
