@@ -404,6 +404,44 @@ DWORD WINAPI boot_thread(void* param) {
 
 }  // namespace
 
+// One runtime per app at a time. Two runtimes on the same app share its
+// databases, preferences and, for a messenger, its identity keys: SQLite's
+// locking keeps the files intact only as far as each process expects to be
+// alone, and an app's own invariants (a message counter, a ratchet state)
+// break at once. Nothing stopped a second start: a Start-menu shortcut, the
+// library and a script could each launch the same app beside a running one.
+//
+// The lock is a named mutex keyed on the app's data folder (data\apps\<name>,
+// made absolute and lower-cased), held for the life of the process. A second
+// start is refused with a message, and a different app still starts. A
+// mutex left by a process that died counts as free (WAIT_ABANDONED).
+// WINAPK_ALLOW_SECOND_INSTANCE=1 turns the check off.
+bool claim_single_instance(const fs::path& app_dir) {
+    if (!env_var(L"WINAPK_ALLOW_SECOND_INSTANCE").empty()) return true;
+    std::error_code ec;
+    std::wstring key = fs::absolute(app_dir, ec).lexically_normal().wstring();
+    if (ec) key = app_dir.wstring();
+    while (!key.empty() && (key.back() == L'\\' || key.back() == L'/')) key.pop_back();
+    for (wchar_t& c : key) c = static_cast<wchar_t>(towlower(c == L'/' ? L'\\' : c));
+    uint64_t h = 1469598103934665603ull;  // FNV-1a over the UTF-16 units
+    for (const wchar_t c : key) h = (h ^ static_cast<uint16_t>(c)) * 1099511628211ull;
+    wchar_t name[64];
+    swprintf(name, 64, L"Local\\WinApk-app-%016llx", static_cast<unsigned long long>(h));
+    HANDLE m = CreateMutexW(nullptr, FALSE, name);
+    if (!m) return true;  // no lock to be had: do not block the start
+    const DWORD w = WaitForSingleObject(m, 0);
+    if (w == WAIT_OBJECT_0 || w == WAIT_ABANDONED) return true;  // held until exit
+    CloseHandle(m);
+    std::fprintf(stderr, "[win.apk] %s is already running; not starting a second copy\n",
+                 utf8(app_dir.filename().wstring()).c_str());
+    if (env_var(L"WINAPK_HEADLESS").empty()) {
+        const std::wstring msg = app_dir.filename().wstring() +
+                                 L" is already running.\n\nClose it first, then start it again.";
+        MessageBoxW(nullptr, msg.c_str(), L"Win.apk", MB_ICONINFORMATION | MB_OK);
+    }
+    return false;
+}
+
 int wmain(int argc, wchar_t** argv) {
     BootArgs b;
     if (!parse_args(argc, argv, &b.options)) {
@@ -430,6 +468,7 @@ int wmain(int argc, wchar_t** argv) {
         std::fprintf(stderr, "[win.apk] cannot create %s\n", utf8(b.app_dir.wstring()).c_str());
         return 1;
     }
+    if (!claim_single_instance(b.app_dir)) return 3;
     if (!install_app(&b.options, b.options.data / "android")) return 1;
     if (!convert_dex(b.options, b.app_dir, &b.app_jar)) return 1;
 
