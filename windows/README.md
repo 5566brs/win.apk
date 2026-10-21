@@ -193,6 +193,11 @@ Windows hook is unavoidable, and every such change is listed here:
 - `runtime/java/android/content/Context.java`: `getDatabasePath` also takes a
   drive-letter path as absolute, so a database named by its full path is not
   nested inside `databases\`.
+- `runtime/java/com/macapk/loader/CameraBridge.java`: when the capture natives
+  are unbound or report no device (Windows has no capture backend yet), one
+  virtual back camera delivers dark-grey frames, so screens built around a
+  preview open and their other controls work. `MACAPK_VIRTUAL_CAMERA=0` turns
+  it off. On the Mac a real camera always wins.
 
 ## License
 
