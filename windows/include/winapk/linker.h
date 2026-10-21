@@ -109,6 +109,16 @@ public:
     // Loaded images in load order.
     std::vector<const ElfImage*> images() const;
 
+    // One loaded guest library as dl_iterate_phdr reports it.
+    struct PhdrView {
+        uintptr_t bias;
+        const char* file;  // UTF-8; valid as long as the library is loaded
+        const void* phdr;
+        uint16_t phnum;
+        size_t tls_module;
+    };
+    std::vector<PhdrView> phdr_views() const;
+
     // What dladdr reports. Returns false for an address outside guest images.
     struct AddrInfo {
         const char* file;    // UTF-8 path; valid as long as the library is loaded

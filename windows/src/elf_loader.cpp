@@ -149,6 +149,7 @@ std::unique_ptr<ElfImage> ElfImage::map(const std::filesystem::path& path, std::
     for (int i = 0; i < eh.e_phnum; ++i) {
         Phdr ph;
         std::memcpy(&ph, file.data() + eh.e_phoff + i * sizeof(Phdr), sizeof(ph));
+        img->phdrs_.push_back(ph);
         if (ph.p_type == kPtLoad) {
             if (ph.p_filesz > ph.p_memsz || ph.p_offset + ph.p_filesz > file.size()) {
                 *error = "PT_LOAD " + std::to_string(i) + " out of bounds";

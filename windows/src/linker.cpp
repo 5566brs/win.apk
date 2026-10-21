@@ -327,6 +327,18 @@ std::vector<const ElfImage*> GuestLinker::images() const {
     return out;
 }
 
+std::vector<GuestLinker::PhdrView> GuestLinker::phdr_views() const {
+    std::lock_guard<std::recursive_mutex> hold(lock_);
+    std::vector<PhdrView> out;
+    for (const auto& l : libs_) {
+        const ElfImage* img = l->image.get();
+        if (!img || img->phdrs().empty()) continue;
+        out.push_back({img->load_bias(), l->file.c_str(), img->phdrs().data(),
+                       static_cast<uint16_t>(img->phdrs().size()), img->tls_module()});
+    }
+    return out;
+}
+
 bool GuestLinker::describe(const void* addr, AddrInfo* info) const {
     std::lock_guard<std::recursive_mutex> hold(lock_);
     for (const auto& l : libs_) {
@@ -444,6 +456,41 @@ WINAPK_GUEST_ABI int g_dladdr(const void* addr, GuestDlInfo* info) {
     return 1;
 }
 
+// Bionic's struct dl_phdr_info (LP64, API 30+ layout); the size argument
+// tells the callback which fields are there.
+struct GuestDlPhdrInfo {
+    uint64_t dlpi_addr;
+    const char* dlpi_name;
+    const void* dlpi_phdr;
+    uint16_t dlpi_phnum;
+    unsigned long long dlpi_adds;
+    unsigned long long dlpi_subs;
+    size_t dlpi_tls_modid;
+    void* dlpi_tls_data;
+};
+using DlIterateCallback = int(WINAPK_GUEST_ABI*)(GuestDlPhdrInfo*, size_t, void*);
+
+// libunwind finds a frame's .eh_frame_hdr through dl_iterate_phdr, so
+// without it every C++ throw in guest code ends in std::terminate.
+WINAPK_GUEST_ABI int g_dl_iterate_phdr(DlIterateCallback cb, void* data) {
+    GuestLinker* linker = GuestLinker::process();
+    if (!linker || !cb) return 0;
+    const std::vector<GuestLinker::PhdrView> views = linker->phdr_views();
+    for (const GuestLinker::PhdrView& v : views) {
+        GuestDlPhdrInfo info{};
+        info.dlpi_addr = v.bias;
+        info.dlpi_name = v.file;
+        info.dlpi_phdr = v.phdr;
+        info.dlpi_phnum = v.phnum;
+        info.dlpi_adds = views.size();
+        info.dlpi_subs = 0;
+        info.dlpi_tls_modid = v.tls_module;
+        info.dlpi_tls_data = nullptr;
+        if (int r = cb(&info, sizeof(info), data)) return r;
+    }
+    return 0;
+}
+
 struct LibdlSymbol {
     const char* name;
     void* addr;
@@ -458,6 +505,7 @@ const LibdlSymbol kLibdl[] = {
     WINAPK_LIBDL("dlclose", g_dlclose),
     WINAPK_LIBDL("dlerror", g_dlerror),
     WINAPK_LIBDL("dladdr", g_dladdr),
+    WINAPK_LIBDL("dl_iterate_phdr", g_dl_iterate_phdr),
 };
 
 #undef WINAPK_LIBDL
