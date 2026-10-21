@@ -23,6 +23,7 @@
 #include <io.h>
 #include <sys/stat.h>
 #include <windows.h>
+#include <bcrypt.h>
 
 namespace winapk::bionic {
 
@@ -73,9 +74,35 @@ int crt_open_flags(int f) {
     return c;
 }
 
+// /dev/urandom and /dev/random: a character device that reads as an endless
+// stream from the system RNG. Windows has no such file, so open() failed and
+// native code that CHECKs the descriptor (folly's Random.cpp, in WhatsApp
+// right after registration) aborted the process.
+class RandomDevice : public FdObject {
+public:
+    int64_t read(void* buf, size_t n) override {
+        if (n == 0) return 0;
+        if (n > 0x7fffffff) n = 0x7fffffff;
+        if (BCryptGenRandom(nullptr, static_cast<PUCHAR>(buf), static_cast<ULONG>(n),
+                            BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) {
+            *guest_errno() = 5;  // EIO
+            return -1;
+        }
+        return static_cast<int64_t>(n);
+    }
+    int64_t write(const void*, size_t n) override { return static_cast<int64_t>(n); }  // entropy is discarded
+    short ready(short events) override { return static_cast<short>(events & (1 | 4)); }  // POLLIN | POLLOUT
+    unsigned mode() const override { return 0020000; }  // S_IFCHR
+};
+
+bool is_random_device(const char* path) {
+    return path && (std::strcmp(path, "/dev/urandom") == 0 || std::strcmp(path, "/dev/random") == 0);
+}
+
 // open() is variadic (its mode is the third argument only with O_CREAT), but a
 // variadic int travels in the same register as a fixed one.
 WINAPK_GUEST_ABI int g_open(const char* path, int flags, unsigned mode) {
+    if (is_random_device(path)) return fd_install(std::make_shared<RandomDevice>());
     const std::wstring w = host_path(path);
     if (flags & kODirectory) {
         const DWORD a = GetFileAttributesW(w.c_str());
@@ -490,7 +517,32 @@ std::wstring crt_mode(const char* mode) {
     return m;
 }
 
+// fopen("/dev/urandom"): a guest FILE* is the CRT's, which cannot wrap an
+// FdObject, so hand out a delete-on-close temporary file pre-filled from the
+// system RNG. Entropy readers (mbedtls' platform poll, in WhatsApp's msys
+// networking) open, read a few dozen bytes and close; without this their DRBG
+// seed failed (-52) and the process aborted.
+FILE* open_random_stream() {
+    wchar_t dir[MAX_PATH + 1], name[MAX_PATH + 1];
+    if (!GetTempPathW(MAX_PATH, dir) || !GetTempFileNameW(dir, L"rnd", 0, name)) {
+        *guest_errno() = 5;  // EIO
+        return nullptr;
+    }
+    FILE* f = _wfopen(name, L"w+bD");  // D: deleted when closed
+    if (!f) {
+        set_errno_from_crt(errno);
+        DeleteFileW(name);
+        return nullptr;
+    }
+    static constexpr size_t kBytes = 64 * 1024;
+    std::unique_ptr<unsigned char[]> buf(new unsigned char[kBytes]);
+    BCryptGenRandom(nullptr, buf.get(), static_cast<ULONG>(kBytes), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    std::fwrite(buf.get(), 1, kBytes, f);
+    std::rewind(f);
+    return f;
+}
 WINAPK_GUEST_ABI FILE* g_fopen(const char* path, const char* mode) {
+    if (is_random_device(path)) return open_random_stream();
     FILE* f = _wfopen(host_path(path).c_str(), crt_mode(mode).c_str());
     if (!f) set_errno_from_crt(errno);
     return f;
@@ -516,6 +568,13 @@ WINAPK_GUEST_ABI int g_fputs(const char* s, void* f) { return std::fputs(s, host
 WINAPK_GUEST_ABI int g_fputc(int c, void* f) { return std::fputc(c, host_file(f)); }
 WINAPK_GUEST_ABI int g_putchar(int c) { return std::fputc(c, stdout); }
 WINAPK_GUEST_ABI char* g_fgets(char* s, int n, void* f) { return std::fgets(s, n, host_file(f)); }
+WINAPK_GUEST_ABI char* g_fgets_chk(char* s, int n, void* f, size_t bn) {
+    if (n < 0 || static_cast<size_t>(n) > bn) {
+        std::fprintf(stderr, "[win.apk] guest FORTIFY: fgets: prevented buffer overflow\n");
+        std::abort();
+    }
+    return g_fgets(s, n, f);
+}
 WINAPK_GUEST_ABI int g_fgetc(void* f) { return std::fgetc(host_file(f)); }
 WINAPK_GUEST_ABI int g_ungetc(int c, void* f) { return std::ungetc(c, host_file(f)); }
 WINAPK_GUEST_ABI int g_fflush(void* f) { return std::fflush(f ? host_file(f) : nullptr); }
@@ -634,6 +693,7 @@ const ShimSymbol kSymbols[] = {
     WINAPK_SHIM("putc", g_fputc),
     WINAPK_SHIM("putchar", g_putchar),
     WINAPK_SHIM("fgets", g_fgets),
+    WINAPK_SHIM("__fgets_chk", g_fgets_chk),
     WINAPK_SHIM("fgetc", g_fgetc),
     WINAPK_SHIM("getc", g_fgetc),
     WINAPK_SHIM("ungetc", g_ungetc),
