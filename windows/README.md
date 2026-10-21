@@ -115,6 +115,10 @@ from Java (`GLSurfaceView`, libGDX) on ANGLE, and so do apps that draw with
 OpenGL ES from their own native code through a SurfaceView (SDL games);
 `NativeActivity` apps and native audio (OpenSL ES, AAudio) are not there yet. App data goes to `%LOCALAPPDATA%\Win.apk`.
 
+The app sees a 360x800 dp phone, the most common phone screen, made shorter
+(down to 360x640) when the window would not fit the screen's work area.
+`WINAPK_PHONE_SIZE=412x915` sets another size, in dp.
+
 For tests, `WINAPK_HEADLESS=1` runs without a window,
 `WINAPK_HEADLESS_FRAME=frame.bmp` saves the last frame the app drew, and
 `WINAPK_HEADLESS_EXIT_AFTER_FRAMES=30` exits that many display frames after the
