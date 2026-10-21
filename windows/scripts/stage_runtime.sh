@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # stage_runtime.sh -- assembles a runnable Win.apk runtime folder:
 #
+#   <out>/Win.apk.exe                 the app library (launcher/)
 #   <out>/bin/winapk-runtime.exe
 #   <out>/bin/macapk-translator.exe, winapk-guest-stub.dll (app native libraries)
 #   <out>/bin/libEGL.dll, libGLESv2.dll, ... (ANGLE, for GL; fetch_angle.sh)
@@ -24,6 +25,9 @@ OUT="$(cd -- "$OUT" && pwd)"
 "$HERE/build_java.sh" "$OUT"
 "$HERE/build_framework_res.sh" "$OUT/bin/tools/framework-res.apk"
 cp -f "$BUILD/winapk-runtime.exe" "$BUILD/macapk-translator.exe" "$BUILD/winapk-guest-stub.dll" "$OUT/bin/"
+cp -f "$BUILD/Win.apk.exe" "$OUT/"
+# The tile an app without an icon gets in the library.
+cp -f "$HERE/../launcher/winapk.png" "$OUT/bin/"
 "$HERE/fetch_angle.sh" "$OUT/bin"
 rm -rf "$OUT/.build"  # build_java.sh's scratch, not part of the runtime
 echo "[stage] runtime staged in $OUT"

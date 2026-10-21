@@ -251,8 +251,12 @@ implements in `runtime/src`; on Windows `windows/host/native_*.cpp`):
 | `arm32_lifter.cpp`, `bionic_shim_arm32*.cpp`, `bionic_shim_gles1.cpp`, `elf_reader.cpp`, `elf64_reader.cpp` | 19,296 | ARM translation | n/a (D8: the ARM stage) | - |
 
 **Launcher** (`launcher/*.swift`, 17,851 lines): the Mac app library, install
-UI and per-app bundles. Windows: a launcher with Start menu entries (M8). Until
-then, `Run APK.bat`.
+UI and per-app bundles. Windows: `launcher/launcher_main.cpp` (`Win.apk.exe`),
+an app library that installs APKs (`winapk-runtime --install-only` renders the
+icon and name, as upstream's `--extract-only` does) and gives each app a Start
+menu and desktop shortcut, plus an Inno Setup installer (`package/winapk.iss`).
+Still to come from upstream's launcher: updates, per-app settings, app data
+management.
 
 ## 5. Technical findings
 

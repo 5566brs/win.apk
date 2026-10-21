@@ -62,7 +62,7 @@ jobs:
         run: |
           cmake -S windows -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++ \
             -DWINAPK_JNI_INCLUDE="$(cygpath -u "$JAVA_HOME")/include"
-          cmake --build build --target winapk-runtime
+          cmake --build build --target winapk-runtime winapk-launcher
           export JAVA_HOME="$(cygpath -u "$JAVA_HOME")"
           windows/scripts/stage_runtime.sh build runtime
       - name: Run the sweep

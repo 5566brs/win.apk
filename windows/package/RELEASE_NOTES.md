@@ -1,6 +1,9 @@
 A pre-release for testing: Win.apk runs Android apps on Windows 10/11 x64.
 
-**Download** `Win.apk-windows-x64.zip`, unzip it, and drag an `.apk` onto `Run APK.bat`. Java and ANGLE are included. `README.txt` in the folder has the details.
+## Getting started
+- **Install:** run `Win.apk-Setup.exe`. It installs per user, with no administrator rights, and puts Win.apk in the Start menu. If you'd rather not install, unzip `Win.apk-windows-x64.zip` and start `Win.apk.exe`.
+- **Add apps:** drag `.apk` files onto the Win.apk window, or double-click them in Explorer. Each app gets its own icon in the library, the Start menu and the desktop.
+- **Included:** Java and ANGLE. `README.txt` has the details.
 
 ## What works
 - **Java/Kotlin apps:** each opens in its own window, with mouse, wheel and keyboard input. Escape is Back.

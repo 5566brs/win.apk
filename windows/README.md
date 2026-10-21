@@ -73,18 +73,32 @@ broken SEH unwind data for `sysv_abi` functions.
 
 ## Trying it
 
-Download `Win.apk-windows-x64.zip` from the repository's Releases page, unzip
-it and drag an `.apk` onto `Run APK.bat`. The folder holds the runtime, a Java
-runtime, ANGLE and `README.txt`, which says what works, where app data and
-logs are, and what to attach to a bug report. Every CI run on
+Download `Win.apk-Setup.exe` (or `Win.apk-windows-x64.zip`) from the
+repository's Releases page. The installer puts Win.apk in the Start menu for
+the current user and opens `.apk` files with it. `Win.apk.exe` is the app
+library (`launcher/launcher_main.cpp`, the counterpart of upstream's
+`launcher/`):
+
+- **Adding an app:** drop an APK on it to install the app. The APK is copied into
+  `%LOCALAPPDATA%\Win.apk\library`, installed and converted once by
+  `winapk-runtime --install-only` (which also renders the app's icon and
+  resolves its name), and given Start menu and desktop shortcuts with its own
+  icon.
+- **Running and removing:** double-click an app to run it, or right-click to
+  remove it.
+
+The package holds the runtime, a Java runtime, ANGLE and `README.txt`, which
+says what works, where app data and logs are, and what to attach to a bug
+report. Every CI run on
 `windows-latest` also uploads the same folder as the `winapk-preview`
 artifact.
 
 A release is made by running the "Windows release" workflow
 (`.github/workflows/windows-release.yml`) by hand with a tag such as
 `v0.1.0-preview`: it builds on Windows, packages `windows/package/` with the
-staged runtime, boots an APK from the package as a smoke test, and publishes
-the zip as a GitHub pre-release with `windows/package/RELEASE_NOTES.md`.
+staged runtime, boots an APK from the package as a smoke test, builds the
+installer with Inno Setup, and publishes both as a GitHub pre-release with
+`windows/package/RELEASE_NOTES.md`.
 
 ## Running an APK
 
@@ -123,7 +137,8 @@ Done so far:
   SQLite.
 - OpenGL ES on ANGLE, from Java and from app native code (`ANativeWindow`,
   EGL window surfaces), plus libandroid's assets.
-- The packaged preview and the release workflow.
+- The app library (`Win.apk.exe`) with shortcuts per app, the installer
+  (`package/winapk.iss`) and the release workflow.
 
 Next, in order: OpenSL ES and AAudio for native sound, `NativeActivity`,
 `NativeMedia` (MediaPlayer and video on Media Foundation), WebView2, the

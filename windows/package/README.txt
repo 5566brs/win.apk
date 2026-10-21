@@ -25,24 +25,36 @@ What does not work yet
   playback, the camera, WebView (web pages inside apps), location.
 - Google Play services (sign-in, in-app purchases, maps).
 
-How to run an app
------------------
-1. Unzip this folder anywhere, for example to C:\Win.apk.
-2. Drag an .apk file (or an .apkm, .xapk or .apks bundle) onto
-   "Run APK.bat".
-3. The first start of each app takes a while (up to a minute) because its
-   code is converted once. Later starts are faster.
+Installing Win.apk
+------------------
+Win.apk-Setup.exe installs it for your user (no administrator rights): Win.apk
+goes into the Start menu, and .apk files open with it. Or unzip
+Win.apk-windows-x64.zip anywhere and start Win.apk.exe from that folder.
 
-Close the app's window to quit. Apps from F-Droid (f-droid.org) are a good
-place to start: they are free, open source, and usually Java-only.
+Adding and running apps
+-----------------------
+Open Win.apk: it shows your app library.
+- Add an app: drag an .apk (or an .apkm, .xapk or .apks bundle) onto the
+  window, click "Add app...", or double-click the .apk in Explorer.
+  Installing takes up to a minute, once per app.
+- Each installed app gets its own icon in the library, in the Start menu
+  (Start > Win.apk Apps) and on the desktop.
+- Double-click an app to open it. Right-click for more: a new desktop
+  shortcut, the last log, or removing the app.
+
+In an app, the mouse is your finger, the wheel scrolls, and Escape is
+Android's Back. Close the app's window to quit. Apps from F-Droid
+(f-droid.org) are a good place to start: they are free, open source, and
+usually Java-only.
 
 Where things are
 ----------------
-App data:  %LOCALAPPDATA%\Win.apk\android
-Last log:  %LOCALAPPDATA%\Win.apk\logs\last-run.log
+Installed apps:  %LOCALAPPDATA%\Win.apk\library
+App data:        %LOCALAPPDATA%\Win.apk\android
+Last log:        %LOCALAPPDATA%\Win.apk\logs\last-run.log
 
-To start an app from scratch, delete its folder under
-%LOCALAPPDATA%\Win.apk.
+Removing an app from the library keeps what it saved; uninstalling Win.apk
+keeps the apps too. Delete %LOCALAPPDATA%\Win.apk to start from scratch.
 
 Reporting a problem
 -------------------

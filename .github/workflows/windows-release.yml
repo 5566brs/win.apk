@@ -1,6 +1,7 @@
 # Publishes a Win.apk pre-release: builds the runtime on Windows, packages it
 # with a Java runtime and ANGLE (the same folder as CI's winapk-preview
-# artifact), and attaches the zip to a GitHub release for the given tag.
+# artifact), makes the installer (windows/package/winapk.iss), and attaches
+# both to a GitHub release for the given tag.
 name: Windows release
 
 on:
@@ -58,7 +59,7 @@ jobs:
           unzip -q jre.zip -d jre-unpacked
           mv jre-unpacked/* Win.apk/jre
           test -f Win.apk/jre/bin/server/jvm.dll
-          cp "windows/package/Run APK.bat" windows/package/README.txt Win.apk/
+          cp windows/package/README.txt Win.apk/
           zip -qr Win.apk-windows-x64.zip Win.apk
       - name: Smoke test the package
         run: |
@@ -69,12 +70,20 @@ jobs:
           timeout 600 ./Win.apk/bin/winapk-runtime.exe --apk sudoku.apk --data "$(cygpath -w "$PWD/appdata")" \
             > boot.log 2>&1 || { tail -n 200 boot.log; exit 1; }
           grep -E "frames presented" boot.log
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
+          $version = "${{ inputs.tag }}".TrimStart("v")
+          & $iscc "/DSourceDir=$PWD\Win.apk" "/DAppVersion=$version" "/O$PWD" windows\package\winapk.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Publish
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ inputs.tag }}" Win.apk-windows-x64.zip `
+          gh release create "${{ inputs.tag }}" Win.apk-Setup.exe Win.apk-windows-x64.zip `
             --prerelease --target "${{ github.sha }}" `
             --title "Win.apk ${{ inputs.tag }}" `
             --notes-file windows/package/RELEASE_NOTES.md

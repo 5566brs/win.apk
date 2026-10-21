@@ -118,7 +118,8 @@ TOOLS="$WORK/tools"
 rm -rf "$TOOLS"
 mkdir -p "$TOOLS"
 find "$HERE/../java" -name '*.java' | sort | native_paths > "$WORK/tools.list"
-"$JAVAC" -d "$TOOLS" --release 21 @"$WORK/tools.list"
+# AppMeta calls into the framework and the loader, compiled into $TMP above.
+"$JAVAC" -d "$TOOLS" --release 21 -cp "$(native_path "$TMP")" @"$WORK/tools.list"
 ( cd "$TOOLS" && "$JAR" --create --file "$LIB/winapk-tools.jar" . )
 
 echo "[build_java] $LIB/android-framework.jar"

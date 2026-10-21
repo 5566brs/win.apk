@@ -12,7 +12,12 @@
 //   4. Bind the host natives (host_natives.h).
 //   5. Call com.macapk.loader.Boot.run.
 //
-//   winapk-runtime --apk <file.apk> [--data <dir>] [--jdk <dir>] [--lib <dir>]
+//   winapk-runtime --apk <file.apk> [--data <dir>] [--jdk <dir>] [--lib <dir>] [--install-only]
+//
+// --install-only stops after step 2 plus the launcher's metadata: the app's
+// icon and name in <app dir>/icon.png and label.txt (com.winapk.tools.AppMeta,
+// in a JVM with the host natives but no app running), which is what the
+// launcher (launcher/) runs when an APK is added to the library.
 //
 // App data lives under %LOCALAPPDATA%\Win.apk unless --data says otherwise.
 // There is no window yet (milestone M2); what the app does shows in the log.
@@ -43,6 +48,7 @@ namespace {
 
 struct Options {
     fs::path apk, data, jdk, lib;
+    bool install_only = false;
 };
 
 std::string utf8(const std::wstring& w) {
@@ -96,6 +102,7 @@ bool parse_args(int argc, wchar_t** argv, Options* o) {
         else if (a == L"--data") ok = value(&o->data);
         else if (a == L"--jdk") ok = value(&o->jdk);
         else if (a == L"--lib") ok = value(&o->lib);
+        else if (a == L"--install-only") o->install_only = true;
         else ok = false;
         if (!ok) return false;
     }
@@ -231,7 +238,8 @@ std::vector<std::string> jvm_options(const BootArgs& b) {
     std::error_code ec;
     std::vector<std::string> v;
     v.push_back("-Djava.class.path=" + jvm_path(o.lib / "android-framework.jar") + ";" +
-                jvm_path(o.lib / "macapk-loader.jar") + ";" + jvm_path(o.lib / "bcprov-jdk18on-1.79.jar"));
+                jvm_path(o.lib / "macapk-loader.jar") + ";" + jvm_path(o.lib / "bcprov-jdk18on-1.79.jar") +
+                (o.install_only ? ";" + jvm_path(o.lib / "winapk-tools.jar") : std::string()));
     // Upstream's set (runtime/src/jvm_loader.cpp), minus the Mac-only parts.
     v.push_back("-Xrs");
     v.push_back("-Djava.library.path=");
@@ -335,6 +343,22 @@ DWORD WINAPI boot_thread(void* param) {
     macapk::sqlite::RegisterNativeSqliteMethods(env);
     check_exception(env, "RegisterNativeSqliteMethods");
 
+    // Java strings take UTF-8 here (modified UTF-8 is identical outside NUL
+    // and supplementary characters, which paths do not contain).
+    auto jstr = [&](const fs::path& p) { return env->NewStringUTF(utf8(p.wstring()).c_str()); };
+
+    if (o.install_only) {
+        jclass meta = env->FindClass("com/winapk/tools/AppMeta");
+        jmethodID write = meta ? env->GetStaticMethodID(meta, "write", "(Ljava/lang/String;Ljava/lang/String;)V")
+                               : nullptr;
+        if (write) env->CallStaticVoidMethod(meta, write, jstr(o.apk), jstr(b->app_dir));
+        check_exception(env, "AppMeta.write");
+        // Framework threads the icon render started must not keep the
+        // process alive.
+        std::fflush(stderr);
+        TerminateProcess(GetCurrentProcess(), write ? 0 : 1);
+    }
+
     jclass boot = env->FindClass("com/macapk/loader/Boot");
     check_exception(env, "FindClass com.macapk.loader.Boot");
     jmethodID run = boot ? env->GetStaticMethodID(
@@ -345,9 +369,6 @@ DWORD WINAPI boot_thread(void* param) {
         check_exception(env, "Boot.run lookup");
         return 1;
     }
-    // Java strings take UTF-8 here (modified UTF-8 is identical outside NUL
-    // and supplementary characters, which paths do not contain).
-    auto jstr = [&](const fs::path& p) { return env->NewStringUTF(utf8(p.wstring()).c_str()); };
     // The manifest argument names a decoded text manifest, which Windows does
     // not produce; Manifest.parse then reads the binary one from the APK.
     env->CallStaticVoidMethod(boot, run, jstr(o.apk), jstr(b->app_jar), jstr(b->app_dir),
@@ -365,7 +386,8 @@ DWORD WINAPI boot_thread(void* param) {
 int wmain(int argc, wchar_t** argv) {
     BootArgs b;
     if (!parse_args(argc, argv, &b.options)) {
-        std::fprintf(stderr, "usage: winapk-runtime --apk <file.apk|.apkm|.xapk|.apks> [--data <dir>] [--jdk <dir>] [--lib <dir>]\n");
+        std::fprintf(stderr, "usage: winapk-runtime --apk <file.apk|.apkm|.xapk|.apks> [--data <dir>] [--jdk <dir>] [--lib <dir>] "
+                     "[--install-only]\n");
         return 2;
     }
     if (!resolve_paths(&b.options)) return 2;

@@ -211,3 +211,13 @@ if(WINAPK_JNI_INCLUDE)
 else()
   message(STATUS "WINAPK_JNI_INCLUDE not set; skipping the JNI wrapper target (winapk_jni, winapk-jni-test)")
 endif()
+
+# Win.apk.exe, the app library (launcher/launcher_main.cpp): installs APKs,
+# lists them, gives each a Start menu and desktop shortcut, and runs them
+# through winapk-runtime.
+enable_language(RC)
+add_executable(winapk-launcher WIN32 launcher/launcher_main.cpp launcher/launcher.rc)
+set_target_properties(winapk-launcher PROPERTIES OUTPUT_NAME "Win.apk")
+target_compile_definitions(winapk-launcher PRIVATE UNICODE _UNICODE _WIN32_WINNT=0x0A00 WINVER=0x0A00)
+target_link_options(winapk-launcher PRIVATE -municode -static)
+target_link_libraries(winapk-launcher PRIVATE comctl32 shell32 ole32 uuid windowscodecs gdi32 msimg32 uxtheme)
