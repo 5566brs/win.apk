@@ -87,6 +87,15 @@ struct Slot<Field> {
     std::abort();
 }
 
+// GetJavaVM hands the guest the guest JavaVM (System V slots), never HotSpot's:
+// a guest that calls (*vm)->GetEnv on HotSpot's own table passes System V
+// arguments to a Microsoft x64 function and faults inside jni_GetEnv.
+WINAPK_GUEST_ABI jint guest_get_java_vm(JNIEnv*, JavaVM** vm) {
+    if (!vm) return JNI_ERR;
+    *vm = reinterpret_cast<JavaVM*>(&g_guest_vm);
+    return JNI_OK;
+}
+
 void build_guest_table() {
     JNINativeInterface_& t = g_guest_table;
 #define WINAPK_JNI_RESERVED(i)
@@ -105,6 +114,7 @@ void build_guest_table() {
     // The one plain slot that cannot just forward: the function pointers the
     // guest registers are System V and need a thunk each (jni_bind.h).
     *reinterpret_cast<void**>(&t.RegisterNatives) = reinterpret_cast<void*>(&guest_register_natives);
+    *reinterpret_cast<void**>(&t.GetJavaVM) = reinterpret_cast<void*>(&guest_get_java_vm);
 }
 
 // Updates this thread's guest env to wrap `host` and returns it as a JNIEnv*.
