@@ -34,6 +34,7 @@
 #include <shellapi.h>
 
 #include "gl/gl_surface.h"
+#include "native_window.h"
 #include "win32_window.h"
 #include "winapk/mini_bionic.h"
 
@@ -378,6 +379,35 @@ void JNICALL Cocoa_exitProcess(JNIEnv*, jclass, jint code, jstring);
 
 void present_pixels(const uint32_t* argb, int w, int h);
 
+// ---- the guest layer ---------------------------------------------------------
+//
+// Frames an app's native code renders into its ANativeWindow
+// (native_window.h). While they keep coming the window shows them, and the
+// view tree's frame is composited over them through the hole the owning
+// SurfaceView punches, or not at all when the native window has no known
+// owner or sits on top (SurfaceView.macapkNativeWindowLayerZ, pulled by the
+// render thread: 0 legacy above-all slot, 1 below the window, 2 on top).
+std::atomic<int> g_content_w{0}, g_content_h{0};
+std::atomic<int> g_guest_layer_z{0};
+std::atomic<unsigned long long> g_guest_last_ms{0};
+std::mutex g_tree_lock;
+std::vector<uint32_t> g_tree_frame;
+int g_tree_w = 0, g_tree_h = 0;
+
+bool guest_live() {
+    const unsigned long long last = g_guest_last_ms.load();
+    return last != 0 && GetTickCount64() - last < 500;
+}
+
+// The view tree's latest frame, kept for compositing once a guest has shown.
+void keep_tree_frame(const uint32_t* argb, int w, int h) {
+    if (g_guest_last_ms.load() == 0) return;
+    std::lock_guard<std::mutex> hold(g_tree_lock);
+    g_tree_frame.assign(argb, argb + static_cast<size_t>(w) * h);
+    g_tree_w = w;
+    g_tree_h = h;
+}
+
 // One GL view's tick: ANGLE's context on its pbuffer, the renderer's
 // lifecycle and frame, then the pixels for the window when it is the content.
 void gl_tick(JNIEnv* env, jlong view, Renderer& r, jobject callbacks, jmethodID changed, jmethodID draw,
@@ -394,9 +424,29 @@ void gl_tick(JNIEnv* env, jlong view, Renderer& r, jobject callbacks, jmethodID 
     check_tick_exception(env);
     static std::vector<uint32_t> pixels;
     int fw = 0, fh = 0;
-    if (ready && !t_tick_withheld && view == g_content_view.load() && gl_frame_read(&pixels, &fw, &fh)) {
+    if (ready && !t_tick_withheld && view == g_content_view.load() && !guest_live() &&
+        gl_frame_read(&pixels, &fw, &fh)) {
         present_pixels(pixels.data(), fw, fh);
     }
+}
+
+void pull_guest_layer_z(JNIEnv* env) {
+    static jclass cls = nullptr;
+    static jmethodID z = nullptr;
+    static bool looked = false;
+    if (!looked) {
+        looked = true;
+        jclass local = env->FindClass("android/view/SurfaceView");
+        if (local) {
+            cls = static_cast<jclass>(env->NewGlobalRef(local));
+            z = env->GetStaticMethodID(cls, "macapkNativeWindowLayerZ", "()I");
+            env->DeleteLocalRef(local);
+        }
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    if (!z) return;
+    g_guest_layer_z = env->CallStaticIntMethod(cls, z);
+    if (env->ExceptionCheck()) env->ExceptionClear();
 }
 
 DWORD WINAPI render_thread(void*) {
@@ -414,6 +464,9 @@ DWORD WINAPI render_thread(void*) {
     for (;;) {
         Sleep(16);
         const int w = static_cast<int>(g_phone_w * density + 0.5f), h = static_cast<int>(g_phone_h * density + 0.5f);
+        g_content_w = w;
+        g_content_h = h;
+        if (g_guest_last_ms.load() != 0) pull_guest_layer_z(env);
         std::vector<std::pair<jlong, jobject>> now;
         std::vector<jlong> dropped;
         {
@@ -562,6 +615,62 @@ void present_pixels(const uint32_t* argb, int w, int h) {
     }
 }
 
+}  // namespace
+
+bool content_pixel_size(int* w, int* h) {
+    *w = g_content_w.load();
+    *h = g_content_h.load();
+    return *w > 0 && *h > 0;
+}
+
+void guest_frame_present(const uint32_t* argb, int w, int h) {
+    if (g_guest_last_ms.exchange(GetTickCount64()) == 0) {
+        std::fprintf(stderr, "[win.apk] native window: first frame from the app's native code (%dx%d)\n", w, h);
+    }
+    if (g_guest_layer_z.load() != 1) {
+        present_pixels(argb, w, h);
+        return;
+    }
+    // The view tree over the guest frame, scaled to the tree's size: where the
+    // tree is transparent (the SurfaceView's hole) the guest shows.
+    thread_local std::vector<uint32_t> out;
+    int tw = 0, th = 0;
+    {
+        std::lock_guard<std::mutex> hold(g_tree_lock);
+        tw = g_tree_w;
+        th = g_tree_h;
+        if (tw <= 0 || th <= 0) {
+            present_pixels(argb, w, h);
+            return;
+        }
+        out.resize(static_cast<size_t>(tw) * th);
+        for (int y = 0; y < th; ++y) {
+            const uint32_t* grow = argb + static_cast<size_t>(y * h / th) * w;
+            const uint32_t* trow = g_tree_frame.data() + static_cast<size_t>(y) * tw;
+            uint32_t* orow = out.data() + static_cast<size_t>(y) * tw;
+            for (int x = 0; x < tw; ++x) {
+                const uint32_t t = trow[x], g = grow[x * w / tw];
+                const uint32_t a = t >> 24;
+                if (a == 255) {
+                    orow[x] = t;
+                } else if (a == 0) {
+                    orow[x] = g | 0xff000000u;
+                } else {
+                    uint32_t px = 0xff000000u;
+                    for (int sh = 0; sh <= 16; sh += 8) {
+                        const uint32_t c = (((t >> sh) & 0xff) * a + ((g >> sh) & 0xff) * (255 - a)) / 255;
+                        px |= c << sh;
+                    }
+                    orow[x] = px;
+                }
+            }
+        }
+    }
+    present_pixels(out.data(), tw, th);
+}
+
+namespace {
+
 // The view tree's frame. While a GL view is the window's content the view
 // tree reaches the window as the overlay layer instead (presentOverlayBitmap).
 void JNICALL Cocoa_presentBitmap(JNIEnv* env, jclass, jintArray argb, jint w, jint h) {
@@ -569,7 +678,9 @@ void JNICALL Cocoa_presentBitmap(JNIEnv* env, jclass, jintArray argb, jint w, ji
     if (is_gl_view(g_content_view.load())) return;
     jint* px = env->GetIntArrayElements(argb, nullptr);
     if (!px) return;
-    present_pixels(reinterpret_cast<const uint32_t*>(px), w, h);
+    keep_tree_frame(reinterpret_cast<const uint32_t*>(px), w, h);
+    // While the app's native code shows frames, its next one brings this along.
+    if (!guest_live()) present_pixels(reinterpret_cast<const uint32_t*>(px), w, h);
     env->ReleaseIntArrayElements(argb, px, JNI_ABORT);
 }
 

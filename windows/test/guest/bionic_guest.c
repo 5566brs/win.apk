@@ -15,6 +15,7 @@ int printf(const char*, ...);
 int snprintf(char*, size_t, const char*, ...);
 int sprintf(char*, const char*, ...);
 int asprintf(char**, const char*, ...);
+int sscanf(const char*, const char*, ...);
 int strcmp(const char*, const char*);
 size_t strlen(const char*);
 char* strchr(const char*, int);
@@ -130,6 +131,15 @@ static void test_printf(void) {
     asprintf(&a, "%s-%d", "x", 99);
     check_str("asprintf", a ? a : "(null)", "x-99");
     free(a);
+    // The way engines read GL_VERSION, plus a 64-bit %ld, a set and a skip.
+    int major = 0, minor = 0;
+    long big = 0;
+    float f = 0;
+    char word[16] = {0};
+    const int got = sscanf("OpenGL ES 3.0 (ANGLE) 9000000000 2.5 abc123", "OpenGL ES %d.%d %*s %ld %f %[a-z]", &major,
+                           &minor, &big, &f, word);
+    snprintf(b, sizeof b, "%d: %d.%d %ld %.1f %s", got, major, minor, big, f, word);
+    check_str("sscanf", b, "5: 3.0 9000000000 2.5 abc");
 }
 
 // ---- strings ------------------------------------------------------------------

@@ -1,0 +1,80 @@
+# Publishes a Win.apk pre-release: builds the runtime on Windows, packages it
+# with a Java runtime and ANGLE (the same folder as CI's winapk-preview
+# artifact), and attaches the zip to a GitHub release for the given tag.
+name: Windows release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag, for example v0.1.0-preview'
+        required: true
+        default: 'v0.1.0-preview'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          install: unzip zip
+          pacboy: >-
+            clang:p
+            cmake:p
+            ninja:p
+      - name: Build
+        run: |
+          cmake -S windows -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++ \
+            -DWINAPK_JNI_INCLUDE="$(cygpath -u "$JAVA_HOME")/include"
+          cmake --build build
+      - uses: actions/cache@v4
+        with:
+          path: thirdparty/framework-res
+          key: framework-res-v2-${{ hashFiles('scripts/build_framework_res.sh', 'windows/scripts/build_framework_res.sh') }}
+      - uses: actions/cache@v4
+        with:
+          path: thirdparty/angle-win
+          key: angle-${{ hashFiles('windows/scripts/fetch_angle.sh') }}
+      - name: Stage and package
+        run: |
+          export JAVA_HOME="$(cygpath -u "$JAVA_HOME")"
+          windows/scripts/stage_runtime.sh build Win.apk
+          curl -sSfL -o jre.zip "https://api.adoptium.net/v3/binary/latest/21/ga/windows/x64/jre/hotspot/normal/eclipse"
+          mkdir jre-unpacked
+          unzip -q jre.zip -d jre-unpacked
+          mv jre-unpacked/* Win.apk/jre
+          test -f Win.apk/jre/bin/server/jvm.dll
+          cp "windows/package/Run APK.bat" windows/package/README.txt Win.apk/
+          zip -qr Win.apk-windows-x64.zip Win.apk
+      - name: Smoke test the package
+        run: |
+          apk=org.secuso.privacyfriendlysudoku_101.apk
+          curl -sSfL -o sudoku.apk "https://f-droid.org/repo/$apk" \
+            || curl -sSfL -o sudoku.apk "https://f-droid.org/archive/$apk"
+          export WINAPK_HEADLESS=1 WINAPK_HEADLESS_EXIT_AFTER_FRAMES=30
+          timeout 600 ./Win.apk/bin/winapk-runtime.exe --apk sudoku.apk --data "$(cygpath -w "$PWD/appdata")" \
+            > boot.log 2>&1 || { tail -n 200 boot.log; exit 1; }
+          grep -E "frames presented" boot.log
+      - name: Publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ inputs.tag }}" Win.apk-windows-x64.zip `
+            --prerelease --target "${{ github.sha }}" `
+            --title "Win.apk ${{ inputs.tag }}" `
+            --notes-file windows/package/RELEASE_NOTES.md

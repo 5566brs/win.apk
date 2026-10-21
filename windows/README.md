@@ -73,11 +73,18 @@ broken SEH unwind data for `sysv_abi` functions.
 
 ## Trying it
 
-Every CI run on `windows-latest` uploads a `winapk-preview` artifact: a
-ready-to-run folder with the runtime, a Java runtime and `Run APK.bat`. Unzip
-it and drag an `.apk` onto `Run APK.bat`. Its `README.txt` says what works
-and where the logs are. The folder comes from `windows/package/` plus the
-staged runtime.
+Download `Win.apk-windows-x64.zip` from the repository's Releases page, unzip
+it and drag an `.apk` onto `Run APK.bat`. The folder holds the runtime, a Java
+runtime, ANGLE and `README.txt`, which says what works, where app data and
+logs are, and what to attach to a bug report. Every CI run on
+`windows-latest` also uploads the same folder as the `winapk-preview`
+artifact.
+
+A release is made by running the "Windows release" workflow
+(`.github/workflows/windows-release.yml`) by hand with a tag such as
+`v0.1.0-preview`: it builds on Windows, packages `windows/package/` with the
+staged runtime, boots an APK from the package as a smoke test, and publishes
+the zip as a GitHub pre-release with `windows/package/RELEASE_NOTES.md`.
 
 ## Running an APK
 
@@ -90,8 +97,9 @@ runtime/bin/winapk-runtime.exe --apk app.apk --jdk "$JAVA_HOME"
 as `base.apk` plus `split_*.apk` under `%LOCALAPPDATA%\Win.apk\app`. The app
 opens in its own window, with its own icon, and takes mouse, wheel and keyboard input
 (Escape is Android's Back). Java-only apps work this way, including OpenGL
-from Java (`GLSurfaceView`, libGDX) on ANGLE; apps that draw with OpenGL from
-their own native code do not render yet. App data goes to `%LOCALAPPDATA%\Win.apk`.
+from Java (`GLSurfaceView`, libGDX) on ANGLE, and so do apps that draw with
+OpenGL ES from their own native code through a SurfaceView (SDL games);
+`NativeActivity` apps and native audio (OpenSL ES, AAudio) are not there yet. App data goes to `%LOCALAPPDATA%\Win.apk`.
 
 For tests, `WINAPK_HEADLESS=1` runs without a window,
 `WINAPK_HEADLESS_FRAME=frame.bmp` saves the last frame the app drew, and
@@ -101,8 +109,29 @@ Linux, `windows/test/run_app_wine.sh` boots an APK headless under Wine.
 
 ## Status and next steps
 
-`PORTING.md` holds the design decisions, the technical findings so far, the
-known gaps, and the milestone plan up to a production release.
+The goal is the whole of Mac.apk on Windows x64: every Mac piece ported or
+replaced with its Windows counterpart (PORTING.md section 4 lists them one by
+one), then x86_64 apps at full speed, then ARM-only apps through translation.
+
+Done so far:
+
+- The loader, linker, ELF TLS and the JNI bridge for Android x86_64 libraries.
+- The Bionic shim: about 520 libc functions (threads, files, sockets,
+  epoll, `ALooper`, printf and scanf), on the UCRT and Win32.
+- The host: the window and input, `NativeOs`, `NativeLooper`, images (libwebp,
+  WIC), audio (WASAPI), clipboard, file pickers, game controllers, ICU,
+  SQLite.
+- OpenGL ES on ANGLE, from Java and from app native code (`ANativeWindow`,
+  EGL window surfaces), plus libandroid's assets.
+- The packaged preview and the release workflow.
+
+Next, in order: OpenSL ES and AAudio for native sound, `NativeActivity`,
+`NativeMedia` (MediaPlayer and video on Media Foundation), WebView2, the
+camera and location, signals through vectored exception handling, then the
+launcher (M8) and ARM translation (D8).
+
+`PORTING.md` holds the design decisions, the technical findings, the known
+gaps, and the milestone plan up to a production release.
 
 ## Keeping up with upstream
 

@@ -163,7 +163,7 @@ Everything in this section is merged on `main` and tested in CI on
 | `winapk-jni-test` | The guest `JNIEnv` forwards correctly against a mock JVM, for several return types and argument shapes, and `JavaVM::GetEnv` hands back a guest env |
 | `winapk-jni-variadic-test` | The variadic bridge works for all four call kinds (virtual, static, nonvirtual, `NewObject`), for int, long, object, float and double arguments, through both `...` and `va_list` |
 | `winapk-linker-test` | A four-library tree (root, a `DT_NEEDED` cycle between two libraries, and a plugin opened at runtime) loads through the linker: constructors run dependencies first, symbols resolve across the cycle, `dlsym` on a library finds its dependencies' symbols, the registry tells guest from host addresses, and the guest's `dlopen`, `dlsym`, `dlerror` and `dladdr` behave like bionic's |
-| `winapk-bionic-test` | `test/guest/bionic_guest.c` exercises the shim from guest code: string and ctype functions, `strerror` with Linux numbering, `snprintf` through the System V `va_list` (integers, floats, strings, `%n`, `*` widths), mutexes, condition variables and threads, keys with destructors, files and `stat`, directories, `FILE` I/O, ELF TLS across threads (`.tdata` and `.tbss`, local- and general-dynamic), system properties, UTF-8 conversion and locales, `syscall` (futex wait, wake and timeout), an 8 GiB `PROT_NONE` reservation opened by `mprotect`, `environ`, Android paths under the android root, pipes and eventfd with `poll` and `epoll` across threads, loopback TCP sockets, `socketpair`, `getaddrinfo`, `ALooper` callbacks and wakes, `setenv`/`getenv`, clocks, `mmap` and `sysconf` |
+| `winapk-bionic-test` | `test/guest/bionic_guest.c` exercises the shim from guest code: string and ctype functions, `strerror` with Linux numbering, `snprintf` through the System V `va_list` (integers, floats, strings, `%n`, `*` widths), `sscanf` (64-bit `%ld`, sets, skips), mutexes, condition variables and threads, keys with destructors, files and `stat`, directories, `FILE` I/O, ELF TLS across threads (`.tdata` and `.tbss`, local- and general-dynamic), system properties, UTF-8 conversion and locales, `syscall` (futex wait, wake and timeout), an 8 GiB `PROT_NONE` reservation opened by `mprotect`, `environ`, Android paths under the android root, pipes and eventfd with `poll` and `epoll` across threads, loopback TCP sockets, `socketpair`, `getaddrinfo`, `ALooper` callbacks and wakes, `setenv`/`getenv`, clocks, `mmap` and `sysconf` |
 | `winapk-jvm-run` | With a real HotSpot JVM: a library loaded through the linker runs its `JNI_OnLoad`, which registers `nativeMix` through the guest `RegisterNatives`; `nativeAdd` is handed to HotSpot as a raw guest address and the `NativeMethodBind` hook has to replace it. Both are called from Java, and `nativeAdd` calls back into Java through a variadic `CallStaticIntMethod`. `nativeAdd(3, 4)` must return 19 |
 | `winapk-gl-test` | ANGLE (WARP or SwiftShader on CI) makes a context through `gl_surface`, clears and scissor-clears a pbuffer, and the read-back frame has the right colors, top row first |
 | Headless boot (CI) | `winapk-runtime` boots the F-Droid Sudoku APK on `windows-latest`: DEX conversion, `Application.onCreate`, the first activity resumed, and 30 frames presented. The log and the last frame are a CI artifact |
@@ -172,8 +172,9 @@ Everything in this section is merged on `main` and tested in CI on
 
 A Java-only app runs in a window and takes mouse and keyboard input, but it is
 drawn in software and scaled with GDI. Java OpenGL (`GLSurfaceView`, libGDX)
-renders on ANGLE, read back into the window; native OpenGL from an app's own
-`.so` (NDK games, SDL) does not render yet. SQLite works. Audio and most
+renders on ANGLE, read back into the window, and so does OpenGL ES from an
+app's own `.so` through an `ANativeWindow` (SDL games; `NativeActivity` apps
+not yet). SQLite works. Audio and most
 other host natives are stubs. The
 libc shim covers about twenty functions plus libdl, and HotSpot cannot yet
 find a guest library through `System.loadLibrary` (see the stub DLL note in
@@ -201,8 +202,8 @@ implements in `runtime/src`; on Windows `windows/host/native_*.cpp`):
 | `NativeAudio` | 41 | `audio_backend.mm` | `host/native_audio.cpp`, `audio_engine.cpp` (a WASAPI mixer, a silent clock without a device), `audio_decode.cpp` (WAV, Ogg Vorbis with stb_vorbis, Media Foundation for the rest) | done (speed and pitch move together) | - |
 | `NativeMedia` | 38 | `media_decode.mm`, `video_toolbox.mm`, `video_vp8/vp9_decode.mm` | Media Foundation, libvpx | not started | 2 |
 | `NativeImageCodec` | 1 | `native_methods.cpp` | `host/native_image.cpp`: libwebp for WebP, WIC for the rest | done | - |
-| `NativeGles`, `GLES10`-`GLES32`, `GLUtils` | 3 + 637 + 2 | `native_methods.cpp`, `gles*_bridges.inc`, `angle_glue.cpp` | `host/gl/`: upstream's bindings compiled unchanged (`gl_bridges.cpp`), `gl*` forwarders into ANGLE's DLLs (`gl_stubs.inc`), a pbuffer per GL view read back each frame (`gl_surface.cpp`) | done for Java GL (`GLSurfaceView`, libGDX); guest `libGLESv2.so` not yet | 2 (M2 part 2) |
-| `EGL14`, `EGL15`, `EGLExt`, `MacApkEGL10` | 52 | `native_methods.cpp`, `egl14_bridges.inc`, `angle_glue.cpp` | `host/gl/gl_bridges.cpp` (upstream's `egl14_bridges.inc`) on ANGLE | done for Java; no window surfaces for guest EGL | 2 |
+| `NativeGles`, `GLES10`-`GLES32`, `GLUtils` | 3 + 637 + 2 | `native_methods.cpp`, `gles*_bridges.inc`, `angle_glue.cpp` | `host/gl/`: upstream's bindings compiled unchanged (`gl_bridges.cpp`), `gl*` forwarders into ANGLE's DLLs (`gl_stubs.inc`), a pbuffer per GL view read back each frame (`gl_surface.cpp`) | done for Java GL (`GLSurfaceView`, libGDX) and guest `libGLESv1_CM`/`libGLESv2`/`libGLESv3` (`host/gl/guest_gl.cpp`) | - |
+| `EGL14`, `EGL15`, `EGLExt`, `MacApkEGL10` | 52 | `native_methods.cpp`, `egl14_bridges.inc`, `angle_glue.cpp` | `host/gl/gl_bridges.cpp` (upstream's `egl14_bridges.inc`) on ANGLE | done for Java and guest `libEGL` (window surfaces are pbuffers, see "OpenGL") | - |
 | `ClipboardManager` | 7 | `clipboard_bridge.mm` | `host/native_clipboard.cpp`: text, CF_HTML, URL, the concealed and history-exclusion formats for sensitive clips | done | - |
 | `DocumentPickerHandler` | 2 | `document_picker.mm` | `host/native_picker.cpp`: `IFileOpenDialog`/`IFileSaveDialog`, folder mode, MIME filters | done | - |
 | `HostIcu` | 2 | `icu_host_bridge.cpp` | `host/native_icu.cpp` on Windows' `icu.dll` (1903 and later) | done | - |
@@ -244,6 +245,8 @@ implements in `runtime/src`; on Windows `windows/host/native_*.cpp`):
 | `bionic_shim_cacerts.cpp` | 218 | CA store from the Mac's roots | the Windows root store | not started |
 | `bionic_shim_forkwatch.cpp`, `_elfexec.cpp`, `elfexec_main.cpp` | 1,471 | forked and shipped executables | later (M5) | not started |
 | `media_ndk.cpp` | 701 | NDK `AMediaCodec` | port with `NativeMedia` | not started |
+| `bionic_shim.cpp`: `ANativeWindow_*`, `AAssetManager_*` | - | libandroid's native window and assets | `host/native_window.cpp`, `host/native_asset.cpp` (assets through Java's AssetManager; no native APK index yet) | done |
+| `bionic_shim.cpp`: OpenSL ES | - | libOpenSLES on the audio mixer | `host/native_opensles.cpp`: reports the engine unsupported | not started |
 | `pairip_*`, `art_jni_offsets.h` | 5,286 | Play Integrity emulation | later | - |
 | `arm32_lifter.cpp`, `bionic_shim_arm32*.cpp`, `bionic_shim_gles1.cpp`, `elf_reader.cpp`, `elf64_reader.cpp` | 19,296 | ARM translation | n/a (D8: the ARM stage) | - |
 
@@ -661,8 +664,8 @@ Exit: a Java-only APK boots through `Application.onCreate` and
 Status: the software path is done. A Java-only app draws into a Win32 window
 and responds to the mouse, the wheel and the keyboard (checked with the F-Droid
 Coffee app: toggle, navigation, a settings switch, Back). OpenGL from Java runs
-on ANGLE (see "OpenGL" below; checked with Klooni, a libGDX game). Remaining:
-EGL window surfaces for native OpenGL, sharper text on high-DPI screens (the surface is fixed at
+on ANGLE, from Java and from an app's native code (see "OpenGL" below; checked
+with Klooni, a libGDX game, and Tensy, an SDL 3 game). Remaining: sharper text on high-DPI screens (the surface is fixed at
 density 2 and scaled), window resizing and orientation polish, dark mode, and
 vsync instead of the fixed 60 Hz tick.
 
@@ -692,6 +695,18 @@ to SwiftShader (`WINAPK_ANGLE_BACKEND=d3d11|swiftshader` forces one). Each GL
 view renders into its own pbuffer; after a frame the pixels are read back and
 shown, with the Java UI composited on top as the overlay layer. A swap chain
 on the window would skip the copy; that is left for later.
+
+An app's native code gets the same display (`host/gl/guest_gl.cpp`): every
+GLES 1.1-3.2, GLES 2 extension and EGL 1.5 function wrapped for the System V
+convention (`guest_gl.inc`, generated with the forwarders), and the EGL calls
+that need a window by hand. Its `ANativeWindow` (`host/native_window.cpp`) is a
+size and a format; a window surface on it is a square pbuffer as long as the
+window's longer side, so the app can turn to landscape after making it, and
+`eglSwapBuffers` reads the window's corner back and presents it as the guest
+layer (`ANativeWindow_unlockAndPost` presents the same way for apps that draw
+in software). The view tree goes over the guest layer through the hole the
+owning SurfaceView punches (`SurfaceView.macapkNativeWindowLayerZ`), as
+upstream composites its CAMetalLayer.
 `winapk-gl-test` draws, reads back and checks a frame on CI's software
 backends.
 

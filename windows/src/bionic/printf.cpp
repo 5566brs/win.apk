@@ -1,4 +1,4 @@
-// printf.cpp -- the printf family and liblog's formatted entry points.
+// printf.cpp -- the printf family, sscanf, and liblog's formatted entry points.
 //
 // A guest's variadic arguments arrive the System V way: integers and pointers
 // in rdi..r9 and then on the stack, doubles in xmm0..xmm7 and then on the
@@ -17,6 +17,7 @@
 
 #include "winapk/abi_thunk.h"
 
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -296,6 +297,56 @@ WINAPK_GUEST_ABI int g_vsnprintf_chk(char* buf, size_t n, int, size_t dn, const 
     return format_bounded(buf, n, fmt, va);
 }
 
+// ---- sscanf ------------------------------------------------------------------
+//
+// Every scanf argument is a pointer, so they all come from the guest's integer
+// registers and stack, and the CRT can do the parsing once the format speaks
+// its language: Android's long is 64 bits, so %ld and friends become %lld.
+// The pointers are handed over as a Microsoft va_list, an array of 8-byte
+// slots. Not covered: %Lf (an 80-bit long double here, 64-bit there), %ls and
+// %l[ (32-bit wchar_t), %m (POSIX allocation).
+int scan(const char* in, const char* fmt, SysVVaList* va) {
+    if (!in || !fmt) return -1;
+    std::string out;
+    std::vector<void*> args;
+    for (const char* p = fmt; *p;) {
+        if (*p != '%') {
+            out += *p++;
+            continue;
+        }
+        out += *p++;
+        if (*p == '%') {
+            out += *p++;
+            continue;
+        }
+        bool suppressed = false;
+        if (*p == '*') {
+            suppressed = true;
+            out += *p++;
+        }
+        while (*p >= '0' && *p <= '9') out += *p++;
+        std::string length;
+        while (*p && std::strchr("hljztLq", *p)) length += *p++;
+        const char conv = *p;
+        if (!conv) break;
+        if (std::strchr("diuoxXn", conv) && (length == "l" || length == "q")) length = "ll";
+        out += length;
+        out += *p++;
+        if (conv == '[') {
+            // The set runs to the first ']' that is not its first member.
+            if (*p == '^') out += *p++;
+            if (*p == ']') out += *p++;
+            while (*p && *p != ']') out += *p++;
+            if (*p) out += *p++;
+        }
+        if (!suppressed) args.push_back(reinterpret_cast<void*>(sysv_va_next_gp(va)));
+    }
+    args.push_back(nullptr);
+    return std::vsscanf(in, out.c_str(), reinterpret_cast<va_list>(args.data()));
+}
+
+WINAPK_GUEST_ABI int g_vsscanf(const char* in, const char* fmt, SysVVaList* va) { return scan(in, fmt, va); }
+
 // liblog.
 WINAPK_GUEST_ABI int g_android_log_vprint(int prio, const char* tag, const char* fmt, SysVVaList* va) {
     log_line(prio, tag, format_string(fmt, va).c_str());
@@ -304,6 +355,7 @@ WINAPK_GUEST_ABI int g_android_log_vprint(int prio, const char* tag, const char*
 
 // ---- the variadic forms: make_sysv_variadic_entry hands over the va_list -----
 WINAPK_GUEST_ABI int h_printf(const char* fmt, SysVVaList* va) { return g_vprintf(fmt, va); }
+WINAPK_GUEST_ABI int h_sscanf(const char* in, const char* fmt, SysVVaList* va) { return scan(in, fmt, va); }
 WINAPK_GUEST_ABI int h_fprintf(void* f, const char* fmt, SysVVaList* va) { return g_vfprintf(f, fmt, va); }
 WINAPK_GUEST_ABI int h_dprintf(int fd, const char* fmt, SysVVaList* va) { return g_vdprintf(fd, fmt, va); }
 WINAPK_GUEST_ABI int h_sprintf(char* b, const char* fmt, SysVVaList* va) { return g_vsprintf(b, fmt, va); }
@@ -346,6 +398,8 @@ ShimTable printf_symbols() {
             WINAPK_SHIM("__vsprintf_chk", g_vsprintf_chk),
             WINAPK_SHIM("__vsnprintf_chk", g_vsnprintf_chk),
             WINAPK_SHIM("__android_log_vprint", g_android_log_vprint),
+            WINAPK_SHIM("vsscanf", g_vsscanf),
+            {"sscanf", variadic(2, &h_sscanf)},
             {"printf", variadic(1, &h_printf)},
             {"fprintf", variadic(2, &h_fprintf)},
             {"dprintf", variadic(2, &h_dprintf)},

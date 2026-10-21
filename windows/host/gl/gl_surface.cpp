@@ -6,8 +6,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <mutex>
 
-#include <GLES2/gl2.h>
+#include <GLES3/gl3.h>
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 
@@ -25,6 +26,7 @@ EGLDisplay g_display = EGL_NO_DISPLAY;
 EGLConfig g_config = nullptr;
 EGLContext g_context = EGL_NO_CONTEXT;
 bool g_tried = false;
+std::mutex g_init_lock;
 
 struct ViewSurface {
     EGLSurface surface = EGL_NO_SURFACE;
@@ -50,6 +52,7 @@ EGLDisplay open_display(EGLint type, EGLint device) {
 }
 
 bool init() {
+    std::lock_guard<std::mutex> hold(g_init_lock);
     if (g_tried) return g_context != EGL_NO_CONTEXT;
     g_tried = true;
     if (!gl_available()) {
@@ -121,18 +124,33 @@ bool gl_frame_begin(long long view, int w, int h) {
 
 bool gl_frame_read(std::vector<uint32_t>* argb, int* w, int* h) {
     if (g_cur_w <= 0 || g_cur_h <= 0 || g_context == EGL_NO_CONTEXT) return false;
-    const int W = g_cur_w, H = g_cur_h;
-    std::vector<uint32_t> rgba(static_cast<size_t>(W) * H);
-    // The app may have left another framebuffer bound; the frame is FBO 0.
-    GLint fbo = 0;
+    gl_read_current(argb, g_cur_w, g_cur_h);
+    *w = g_cur_w;
+    *h = g_cur_h;
+    return true;
+}
+
+void gl_read_current(std::vector<uint32_t>* argb, int W, int H) {
+    thread_local std::vector<uint32_t> rgba;
+    rgba.resize(static_cast<size_t>(W) * H);
+    // Whatever the app left bound stays its own: the frame is FBO 0, read
+    // into client memory (no pixel pack buffer, ES 3 only) with no row padding.
+    EGLint version = 2;
+    eglQueryContext(eglGetCurrentDisplay(), eglGetCurrentContext(), EGL_CONTEXT_CLIENT_VERSION, &version);
+    GLint fbo = 0, align = 4, pbo = 0;
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fbo);
+    glGetIntegerv(GL_PACK_ALIGNMENT, &align);
+    if (version >= 3) glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &pbo);
     if (fbo) glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glPixelStorei(GL_PACK_ALIGNMENT, 4);
+    if (pbo) glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    if (align != 4) glPixelStorei(GL_PACK_ALIGNMENT, 4);
     glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    if (align != 4) glPixelStorei(GL_PACK_ALIGNMENT, align);
+    if (pbo) glBindBuffer(GL_PIXEL_PACK_BUFFER, static_cast<GLuint>(pbo));
     if (fbo) glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(fbo));
     argb->resize(rgba.size());
-    // GL rows run bottom-up; RGBA bytes become ARGB (opaque: the window has
-    // nothing behind the GL view).
+    // GL rows run bottom-up; RGBA bytes become ARGB (opaque: nothing is
+    // behind a GL frame in the window).
     for (int y = 0; y < H; ++y) {
         const uint32_t* src = rgba.data() + static_cast<size_t>(H - 1 - y) * W;
         uint32_t* dst = argb->data() + static_cast<size_t>(y) * W;
@@ -141,10 +159,9 @@ bool gl_frame_read(std::vector<uint32_t>* argb, int* w, int* h) {
             dst[x] = 0xff000000u | ((p & 0xff) << 16) | (p & 0xff00) | ((p >> 16) & 0xff);
         }
     }
-    *w = W;
-    *h = H;
-    return true;
 }
+
+void* gl_shared_display() { return init() ? g_display : nullptr; }
 
 void gl_view_release(long long view) {
     auto it = g_surfaces.find(view);

@@ -164,7 +164,8 @@ if(WINAPK_JNI_INCLUDE)
             ${CMAKE_CURRENT_SOURCE_DIR}/cmake/extract_gl_bridges.cmake
     COMMENT "Extracting upstream's GL bindings")
   target_sources(winapk-runtime PRIVATE host/gl/gl_loader.cpp host/gl/gl_stubs.cpp host/gl/gl_bridges.cpp
-                 host/gl/gl_surface.cpp
+                 host/gl/gl_surface.cpp host/gl/guest_gl.cpp host/native_window.cpp host/native_asset.cpp
+                 host/native_opensles.cpp
                  ${WINAPK_GL_UPSTREAM})
   target_include_directories(winapk-runtime PRIVATE host third_party/khronos ${CMAKE_BINARY_DIR}/gl
                              ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/src)

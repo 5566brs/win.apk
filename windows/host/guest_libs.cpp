@@ -17,6 +17,10 @@
 #include "winapk/linker.h"
 #include "winapk/mini_bionic.h"
 
+#include "native_asset.h"
+#include "native_opensles.h"
+#include "native_window.h"
+
 namespace {
 
 std::mutex g_lock;
@@ -149,6 +153,17 @@ jstring JNICALL link_only(JNIEnv* env, jclass, jstring path) {
     return open_for_stub(stub) ? nullptr : env->NewStringUTF("cannot load the library (see the log)");
 }
 
+// The system libraries' functions: the Bionic shim's, then libEGL/libGLES and
+// libandroid's native window and assets and libOpenSLES, which live with the
+// host's GL, window, Java and audio.
+void* resolve_system(const char* name) {
+    if (void* p = winapk::mini_bionic_resolve(name)) return p;
+    if (void* p = winapk::host::guest_gl_resolve(name)) return p;
+    if (void* p = winapk::host::native_window_resolve(name)) return p;
+    if (void* p = winapk::host::native_asset_resolve(name)) return p;
+    return winapk::host::native_opensles_resolve(name);
+}
+
 const winapk::host::HostMethod kLinkerMethods[] = {
     WINAPK_HOST_NATIVE("com.macapk.loader.NativeLinker", "nativeLinkOnly", "(Ljava/lang/String;)Ljava/lang/String;",
                        link_only),
@@ -171,7 +186,7 @@ bool guest_libs_init(JNIEnv* env, jvmtiEnv* jvmti) {
     }
 
     winapk::LinkerConfig config;
-    config.host = winapk::mini_bionic_resolve;
+    config.host = resolve_system;
     config.load.unresolved = missing_stub;
     config.load.unresolved_object = missing_object;
     g_linker = std::make_unique<winapk::GuestLinker>(config);

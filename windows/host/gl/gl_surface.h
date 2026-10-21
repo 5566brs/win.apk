@@ -29,4 +29,13 @@ bool gl_frame_read(std::vector<uint32_t>* argb, int* w, int* h);
 // Drops a view's pbuffer.
 void gl_view_release(long long view);
 
+// The EGLDisplay the framework uses, initialized; null without ANGLE. An app's
+// native code gets the same one from eglGetDisplay (guest_gl.cpp). Any thread.
+void* gl_shared_display();
+
+// Reads the current draw surface's w x h pixels as 0xAARRGGBB rows, top row
+// first (gl_frame_read without the framework's context). Any thread with a
+// current context.
+void gl_read_current(std::vector<uint32_t>* argb, int w, int h);
+
 }  // namespace winapk::host
