@@ -17,6 +17,7 @@
 #include "host_natives.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>

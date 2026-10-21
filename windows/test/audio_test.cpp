@@ -8,7 +8,9 @@
 // a clip voice finishes on time. Without an audio device the mixer keeps time
 // silently, so this runs on CI machines too.
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <fstream>
 #include <iterator>

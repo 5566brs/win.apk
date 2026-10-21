@@ -3,6 +3,7 @@
 #include "win32_window.h"
 
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>

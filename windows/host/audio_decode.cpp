@@ -3,6 +3,7 @@
 
 #include "audio_engine.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 

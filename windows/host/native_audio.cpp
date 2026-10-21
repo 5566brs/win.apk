@@ -5,6 +5,7 @@
 
 #include "host_natives.h"
 
+#include <cstdint>
 #include <map>
 #include <mutex>
 #include <vector>
