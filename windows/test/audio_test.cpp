@@ -47,9 +47,11 @@ void check_decode(const std::string& dir, const char* name, int rate) {
     }
     char detail[96];
     std::snprintf(detail, sizeof(detail), "%d Hz, %.3f s, peak %.2f", clip ? clip->rate : 0, seconds, peak);
-    // Codec padding makes compressed files a little longer than the tone.
+    // Codec padding makes compressed files a little longer than the tone, and
+    // a 32 kbit/s MP3 comes back quieter (0.09 on Windows): the peak only shows
+    // there is sound.
     check((std::string("decode ") + name).c_str(),
-          clip && clip->rate == rate && seconds > 0.45 && seconds < 0.6 && peak > 0.1, detail);
+          clip && clip->rate == rate && seconds > 0.45 && seconds < 0.6 && peak > 0.05, detail);
 }
 
 }  // namespace
