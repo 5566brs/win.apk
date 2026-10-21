@@ -25,6 +25,12 @@ on:
         type: boolean
         default: true
 
+# shell: bash makes GitHub run steps with -eo pipefail, so a failing build
+# piped through tee fails its step instead of showing green.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   java:
     runs-on: ubuntu-latest
@@ -71,7 +77,7 @@ jobs:
 
       - name: Toolchain
         run: |
-          brew install cmake openjdk@21 capstone apktool
+          brew install cmake openjdk@21 capstone apktool libvpx
           echo "JAVA_HOME=$(brew --prefix)/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home" >> "$GITHUB_ENV"
 
       - name: Check requirements
