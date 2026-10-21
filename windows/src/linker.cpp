@@ -339,6 +339,47 @@ std::vector<GuestLinker::PhdrView> GuestLinker::phdr_views() const {
     return out;
 }
 
+// /proc/self/maps as Linux prints it (fs/proc/task_mmu.c show_map_vma): one
+// line per PT_LOAD of every loaded guest library, page-aligned, with its
+// permissions, file offset and path, the path starting at column 73. Native
+// code that locates itself or its neighbours through this file (Facebook's
+// MobileConfig in WhatsApp opens it right after boot and threw
+// "fopen(/proc/self/maps): No such file or directory") gets the same library
+// set and the same path dladdr and dl_iterate_phdr report. Host modules and
+// anonymous memory are not listed: they are not part of the guest's address
+// space as Bionic would describe it.
+std::string GuestLinker::proc_maps() const {
+    std::lock_guard<std::recursive_mutex> hold(lock_);
+    std::string out;
+    char line[128];
+    for (const auto& l : libs_) {
+        const ElfImage* img = l->image.get();
+        if (!img) continue;
+        // A stable stand-in inode, so file-backed lines look file-backed.
+        uint32_t inode = 2166136261u;
+        for (const unsigned char c : l->file) inode = (inode ^ c) * 16777619u;
+        inode = (inode & 0x7fffffffu) | 1u;
+        const uint64_t bias = img->load_bias();
+        constexpr uint64_t kPage = 0x1000;
+        for (const elf::Phdr& ph : img->phdrs()) {
+            if (ph.p_type != elf::kPtLoad || ph.p_memsz == 0) continue;
+            const uint64_t start = (bias + ph.p_vaddr) & ~(kPage - 1);
+            const uint64_t end = (bias + ph.p_vaddr + ph.p_memsz + kPage - 1) & ~(kPage - 1);
+            const int n = std::snprintf(line, sizeof line, "%llx-%llx %c%c%cp %08llx fd:01 %u",
+                                        static_cast<unsigned long long>(start), static_cast<unsigned long long>(end),
+                                        (ph.p_flags & 4) ? 'r' : '-', (ph.p_flags & 2) ? 'w' : '-',
+                                        (ph.p_flags & 1) ? 'x' : '-',
+                                        static_cast<unsigned long long>(ph.p_offset & ~(kPage - 1)), inode);
+            if (n <= 0) continue;
+            out.append(line, static_cast<size_t>(n));
+            out.append(n < 73 ? static_cast<size_t>(73 - n) : 1, ' ');
+            out += l->file;
+            out += '\n';
+        }
+    }
+    return out;
+}
+
 bool GuestLinker::describe(const void* addr, AddrInfo* info) const {
     std::lock_guard<std::recursive_mutex> hold(lock_);
     for (const auto& l : libs_) {

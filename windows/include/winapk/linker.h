@@ -119,6 +119,9 @@ public:
     };
     std::vector<PhdrView> phdr_views() const;
 
+    // /proc/self/maps text for the loaded guest libraries (see linker.cpp).
+    std::string proc_maps() const;
+
     // What dladdr reports. Returns false for an address outside guest images.
     struct AddrInfo {
         const char* file;    // UTF-8 path; valid as long as the library is loaded

@@ -11,6 +11,7 @@
 // elements stand for the same three streams.
 
 #include "bionic_internal.h"
+#include "winapk/linker.h"
 
 #include <cerrno>
 #include <cstdio>
@@ -95,6 +96,45 @@ public:
     unsigned mode() const override { return 0020000; }  // S_IFCHR
 };
 
+// /proc/self/maps (and /proc/<our pid>/maps): synthesized from the guest
+// linker on every open, as the kernel does, into a delete-on-close temporary
+// file, so read, lseek, fstat and stdio all behave as on a regular file.
+bool is_proc_maps(const char* path) {
+    if (!path) return false;
+    if (std::strcmp(path, "/proc/self/maps") == 0 || std::strcmp(path, "/proc/thread-self/maps") == 0) return true;
+    char own[48];
+    std::snprintf(own, sizeof own, "/proc/%lu/maps", static_cast<unsigned long>(GetCurrentProcessId()));
+    return std::strcmp(path, own) == 0;
+}
+
+// A delete-on-close temporary file holding `content`, as a CRT descriptor
+// positioned at 0; -1 with errno set.
+int open_temp_with(const std::string& content) {
+    wchar_t dir[MAX_PATH + 1], name[MAX_PATH + 1];
+    if (!GetTempPathW(MAX_PATH, dir) || !GetTempFileNameW(dir, L"prc", 0, name)) {
+        *guest_errno() = 5;  // EIO
+        return -1;
+    }
+    const int fd = _wopen(name, _O_RDWR | _O_BINARY | _O_TEMPORARY);
+    if (fd < 0) {
+        set_errno_from_crt(errno);
+        DeleteFileW(name);
+        return -1;
+    }
+    if (!content.empty() && _write(fd, content.data(), static_cast<unsigned>(content.size())) < 0) {
+        set_errno_from_crt(errno);
+        _close(fd);
+        return -1;
+    }
+    _lseek(fd, 0, SEEK_SET);
+    return fd;
+}
+
+std::string proc_maps_text() {
+    GuestLinker* linker = GuestLinker::process();
+    return linker ? linker->proc_maps() : std::string();
+}
+
 bool is_random_device(const char* path) {
     return path && (std::strcmp(path, "/dev/urandom") == 0 || std::strcmp(path, "/dev/random") == 0);
 }
@@ -103,6 +143,7 @@ bool is_random_device(const char* path) {
 // variadic int travels in the same register as a fixed one.
 WINAPK_GUEST_ABI int g_open(const char* path, int flags, unsigned mode) {
     if (is_random_device(path)) return fd_install(std::make_shared<RandomDevice>());
+    if (is_proc_maps(path)) return open_temp_with(proc_maps_text());
     const std::wstring w = host_path(path);
     if (flags & kODirectory) {
         const DWORD a = GetFileAttributesW(w.c_str());
@@ -543,6 +584,16 @@ FILE* open_random_stream() {
 }
 WINAPK_GUEST_ABI FILE* g_fopen(const char* path, const char* mode) {
     if (is_random_device(path)) return open_random_stream();
+    if (is_proc_maps(path)) {
+        const int fd = open_temp_with(proc_maps_text());
+        if (fd < 0) return nullptr;
+        FILE* f = _fdopen(fd, "rb");
+        if (!f) {
+            set_errno_from_crt(errno);
+            _close(fd);
+        }
+        return f;
+    }
     FILE* f = _wfopen(host_path(path).c_str(), crt_mode(mode).c_str());
     if (!f) set_errno_from_crt(errno);
     return f;
