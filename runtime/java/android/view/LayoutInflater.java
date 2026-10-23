@@ -2581,6 +2581,23 @@ public class LayoutInflater {
                 break;
         }
         if (minH > 0) {
+            // The table above is in PIXELS AT 2x (56dp = 112px), the Retina
+            // density it was written for. At any other density it is wrong by
+            // that ratio: at 1x (a non-Retina monitor, density 160) every real
+            // ActionBarContainer and wrap_content Toolbar was floored at 112dp,
+            // twice the bar, so each AppCompat screen showed an empty band as
+            // tall as the toolbar under it (NoNonsense Notes, every screen), and
+            // a real TabLayout / ProgressBar got twice its floor. Scaled by the
+            // view's own density, so 2x keeps exactly the old numbers.
+            float density = android.util.DisplayMetrics.macapkDeviceDensity();
+            try {
+                android.util.DisplayMetrics dm = placeholder.getResources() != null
+                    ? placeholder.getResources().getDisplayMetrics() : null;
+                if (dm != null && dm.density > 0f) density = dm.density;
+            } catch (Throwable ignored) {}
+            if (density > 0f && Math.abs(density - 2f) > 0.001f) {
+                minH = Math.max(1, Math.round(minH * density / 2f));
+            }
             // lane layout, 2026-08-01: NEVER LOWER an existing minimum. This
             // hint runs AFTER instantiation (inflateElement line ~513), and a
             // REAL widget's constructor may have just set the correct minimum
