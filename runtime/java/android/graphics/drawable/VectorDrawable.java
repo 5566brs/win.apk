@@ -94,6 +94,8 @@ public class VectorDrawable extends Drawable {
     private final List<PathSpec> paths = new ArrayList<>();
     private final Paint paint = new Paint();
     private int tint = 0;
+    /** The <vector> declared android:tint (see effectiveFillColor). */
+    private boolean macapkTintDeclared;
     private int alpha = 255;
 
     public VectorDrawable() {}
@@ -256,7 +258,10 @@ public class VectorDrawable extends Drawable {
         viewportHeight = parseFloat(root.getAttributeNS(NS, "viewportHeight"), viewportHeight);
         intrinsicWidthDp  = parseDpToPx(root.getAttributeNS(NS, "width"),  intrinsicWidthDp);
         intrinsicHeightDp = parseDpToPx(root.getAttributeNS(NS, "height"), intrinsicHeightDp);
-        tint = parseColor(root.getAttributeNS(NS, "tint"), 0);
+        final String tintAttr = root.getAttributeNS(NS, "tint");
+        macapkTintDeclared = tintAttr != null && !tintAttr.trim().isEmpty();
+        tint = parseColor(tintAttr, 0);
+        if ("true".equalsIgnoreCase(root.getAttributeNS(NS, "autoMirrored"))) setAutoMirrored(true);
 
         // Walk children: <path>, <group>
         walkChildren(root, new ArrayList<GroupXform>());
@@ -571,7 +576,32 @@ public class VectorDrawable extends Drawable {
      *  WORSE, not better, when Theme threading made `?attr` tints actually
      *  resolve: a tint of 0 used to fall through to the 0xFF333333
      *  approximation. */
-    private static int effectiveFillColor(int fillColor, int tint, int alpha, boolean monochrome) {
+    private static int effectiveFillColor(int fillColor, int tint, int alpha, boolean monochrome,
+                                          boolean tintDeclared) {
+        return effectiveFillColor(fillColor, tint, alpha, monochrome, tintDeclared, false);
+    }
+
+    /** Ported from Mac.apk main (902e6ff). A path with a VISIBLE stroke and a
+     *  transparent fill is a stroke-only outline: AOSP draws its stroke and no
+     *  fill (VFullPath fills only when fillColor != TRANSPARENT). The
+     *  transparent-fill-takes-the-tint substitution below filled it solid.
+     *  Measured: Material's switch mtrl_switch_track_decoration (a 2px
+     *  ?colorOutline ring, tinted colorOutline when unchecked) painted the whole
+     *  unchecked track outline-grey, hiding the same-coloured thumb -- every off
+     *  MaterialSwitch was a featureless grey pill (pf-notes Settings).
+     *  MACAPK_VD_STROKE_NO_TINT_FILL=0 restores the fill. */
+    static final boolean MACAPK_VD_TRANSPARENT_TINT =
+        !"0".equals(System.getenv("MACAPK_VD_TRANSPARENT_TINT"));
+    static final boolean MACAPK_VD_STROKE_NO_TINT_FILL =
+        !"0".equals(System.getenv("MACAPK_VD_STROKE_NO_TINT_FILL"));
+    private static boolean macapkStrokeOnly(PathSpec s) {
+        return MACAPK_VD_STROKE_NO_TINT_FILL && s != null && (s.strokeColor >>> 24) != 0
+            && s.strokeWidth > 0f && (s.fillColor >>> 24) == 0 && s.fillShader == null;
+    }
+
+    private static int effectiveFillColor(int fillColor, int tint, int alpha, boolean monochrome,
+                                          boolean tintDeclared, boolean strokeOnly) {
+        if (strokeOnly) return 0;
         int color = fillColor;
         if (tint != 0) {
             int sa = color >>> 24;
@@ -581,7 +611,14 @@ public class VectorDrawable extends Drawable {
                 color = (outA << 24) | (tint & 0x00FFFFFF);
             }
         }
-        if (monochrome && color == 0xFFFFFFFF && tint == 0) color = 0xFF333333;
+        // The white -> grey stand-in is for a vector that DECLARES a theme tint
+        // (`android:tint="?colorControlNormal"`) we could not resolve: its white
+        // paths are a mask, not a colour. A vector that declares NO tint paints
+        // its fill as authored (AOSP VFullPath draws fillColor, nothing else), so
+        // a white icon made for a dark toolbar stays white. Substituting there
+        // painted Privacy Friendly Notes' white "sort A-Z" action #333333 on its
+        // dark-blue toolbar, i.e. nearly invisible.
+        if (monochrome && tintDeclared && color == 0xFFFFFFFF && tint == 0) color = 0xFF333333;
         // A TRANSPARENT fill under a tint takes the tint. This half has always
         // run and is unchanged.
         //
@@ -614,6 +651,20 @@ public class VectorDrawable extends Drawable {
 
     @Override
     public void draw(Canvas canvas) {
+        // AOSP VectorDrawable.draw: needMirroring() (android:autoMirrored and an
+        // RTL layout direction) flips the canvas about the bounds before the
+        // tree is drawn, so a back arrow points the RTL way.
+        if (canvas != null && isAutoMirrored() && getLayoutDirection() == 1 /* RTL */) {
+            final android.graphics.Rect b = getBounds();
+            final int save = canvas.save();
+            canvas.scale(-1f, 1f, (b.left + b.right) / 2f, (b.top + b.bottom) / 2f);
+            try { macapkDrawUnmirrored(canvas); } finally { canvas.restoreToCount(save); }
+            return;
+        }
+        macapkDrawUnmirrored(canvas);
+    }
+
+    private void macapkDrawUnmirrored(Canvas canvas) {
         if (canvas == null || paths.isEmpty()) return;
         // Honor a PROGRAMMATIC tint (Compose Icon(tint=), AppCompat
         // DrawableCompat.setTintList / ?attr/colorControlNormal) over the XML
@@ -621,6 +672,19 @@ public class VectorDrawable extends Drawable {
         // current state. v1.0.423.
         int effTint = macapkEffectiveTint();
         if (effTint != 0) tint = effTint;
+        // Ported from Mac.apk main (902e6ff). A programmatic tint that is fully
+        // TRANSPARENT under SRC_IN (the default mode) paints nothing on AOSP:
+        // the PorterDuffColorFilter keeps the source's coverage but multiplies
+        // by the tint's alpha 0. Ours read tint 0 as "no tint" and drew the
+        // authored colours. Measured: Material's switch decoration ring is
+        // tinted transparent when CHECKED (mtrl_switch_track_decoration_tint),
+        // and every checked MaterialSwitch kept a grey ?colorOutline ring.
+        // MACAPK_VD_TRANSPARENT_TINT=0 restores drawing.
+        if (MACAPK_VD_TRANSPARENT_TINT && mTintList != null && (effTint >>> 24) == 0
+                && (mTintMode == null || mTintMode == android.graphics.PorterDuff.Mode.SRC_IN)
+                && mColorFilter == null) {
+            return;
+        }
         // The explicit colour filter (MACAPK_DRAWABLE_COLOR_FILTER). AOSP
         // VectorDrawable.draw (android14-release): "Color filters always override
         // tint filters." -- `colorFilter = (mColorFilter == null ?
@@ -725,10 +789,10 @@ public class VectorDrawable extends Drawable {
                           // loop paints with, so the trace cannot disagree with the
                           // code it is reporting on (it could, and did, before).
                           .append(" eff=0x").append(Integer.toHexString(
-                              effectiveFillColor(s.fillColor, tint, alpha, monochrome)))
+                              effectiveFillColor(s.fillColor, tint, alpha, monochrome, macapkTintDeclared, macapkStrokeOnly(s))))
                           .append(" WILLDRAW=").append(
                               (s.fillShader != null && tint == 0)
-                              || (effectiveFillColor(s.fillColor, tint, alpha, monochrome)
+                              || (effectiveFillColor(s.fillColor, tint, alpha, monochrome, macapkTintDeclared, macapkStrokeOnly(s))
                                   & 0xFF000000) != 0);
                         // The GEOMETRY. A pathData string our parser cannot read
                         // yields a Path with no segments, which draws with a
@@ -768,7 +832,7 @@ public class VectorDrawable extends Drawable {
             for (PathSpec spec : paths) {
                 int color = (cf != null)
                         ? macapkFilteredFill(spec.fillColor, alpha, cfExact ? cf : null)
-                        : effectiveFillColor(spec.fillColor, tint, alpha, monochrome);
+                        : effectiveFillColor(spec.fillColor, tint, alpha, monochrome, macapkTintDeclared, macapkStrokeOnly(spec));
                 // v1.0.501 (extended: graphics-drawable-11): apply the path's
                 // accumulated <group> transform chain, root-to-leaf. A canvas
                 // op composes with the CURRENT transform such that the

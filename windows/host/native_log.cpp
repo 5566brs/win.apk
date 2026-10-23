@@ -27,6 +27,9 @@ void JNICALL Log_print(JNIEnv* env, jclass, jint level, jstring tag_j, jstring m
     const char* msg = msg_j ? env->GetStringUTFChars(msg_j, nullptr) : "";
     const char* lv = level <= 2 ? "V" : level == 3 ? "D" : level == 4 ? "I" : level == 5 ? "W" : "E";
     std::fprintf(stderr, "[%s] %s: %s\n", lv, tag, msg);
+    // stderr is buffered (runtime_main.cpp, buffer_stderr): warnings and errors
+    // go out at once, so the lines before a crash are on disk.
+    if (level >= 5) std::fflush(stderr);
     if (tag_j) env->ReleaseStringUTFChars(tag_j, tag);
     if (msg_j) env->ReleaseStringUTFChars(msg_j, msg);
 }

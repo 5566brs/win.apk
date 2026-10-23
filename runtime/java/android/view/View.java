@@ -4409,6 +4409,23 @@ public class View implements android.graphics.drawable.Drawable.Callback,
     }
     /** AOSP `View.isPaddingResolved()` (View.java:20208-20210). */
     boolean isPaddingResolved() { return mPaddingResolved; }
+    /** LayoutInflater: android:paddingStart / paddingEnd from the XML or its
+     *  style, kept RELATIVE as AOSP's constructor keeps them (mUserPaddingStart/
+     *  End, :6272-6287) and resolved against the layout direction by
+     *  resolvePadding -- now and again whenever the direction resolves. Pass
+     *  Integer.MIN_VALUE for an edge the XML does not set. The inflater used to
+     *  write start into paddingLeft and end into paddingRight, so under RTL
+     *  every relative padding sat on the wrong side (AppCompat's popup menu
+     *  items: paddingEnd on the right, the title pushed against the left edge). */
+    void macapkSetXmlRelativePadding(int start, int end) {
+        if (start != UNDEFINED_PADDING) mUserPaddingStart = start;
+        if (end != UNDEFINED_PADDING) mUserPaddingEnd = end;
+        mUserPaddingLeftInitial = paddingLeft;
+        mUserPaddingRightInitial = paddingRight;
+        mPaddingResolved = false;
+        resolvePadding();
+    }
+
     /** AOSP `View.setPaddingRelative` (android-11.0.0_r48 View.java:24378-24398).
      *  Material's RelativePadding.applyToView calls this to push
      *  WindowInsets-derived padding back onto the view; without it,
@@ -5875,9 +5892,16 @@ public class View implements android.graphics.drawable.Drawable.Callback,
         // content underneath.
         //
         // v1.0.128: theme-aware fill via `?attr/colorSurface`.
+        // A TOOLBAR is not filled (MACAPK_TOOLBAR_CHROME): AOSP's Toolbar has
+        // no default background, so one without a background is transparent
+        // and shows whatever is behind it -- typically its AppBarLayout, whose
+        // style background (?attr/colorPrimary, Material's
+        // MaterialShapeDrawable included) is drawn. Filling the Toolbar with
+        // colorSurface painted a white band over that colour: PalGate's blue
+        // app bar came out white and its white "OK" button vanished into it.
         if (name.endsWith("AppBarLayout")
-            || name.endsWith("Toolbar")
-            || name.endsWith("MaterialToolbar")) {
+            || (MACAPK_TOOLBAR_CHROME
+                && (name.endsWith("Toolbar") || name.endsWith("MaterialToolbar")))) {
             int fill = backgroundColor;
             if ((fill & 0xFF000000) != 0) return; // already opaque
             // Honor an EXPLICIT background (incl. transparent). F-Droid's
@@ -5895,6 +5919,10 @@ public class View implements android.graphics.drawable.Drawable.Callback,
             return;
         }
     }
+    /** Gate: MACAPK_TOOLBAR_CHROME=1 restores the colorSurface fill behind a
+     *  Toolbar / MaterialToolbar with no background (see macapkPaintMaterialChrome). */
+    static final boolean MACAPK_TOOLBAR_CHROME =
+        "1".equals(System.getenv("MACAPK_TOOLBAR_CHROME"));
     protected void onDraw(android.graphics.Canvas canvas)      {}
     protected void dispatchDraw(android.graphics.Canvas canvas) {}
 
@@ -6046,6 +6074,12 @@ public class View implements android.graphics.drawable.Drawable.Callback,
                     && o.mMode == android.graphics.Outline.MODE_ROUND_RECT
                     && o.mRadius > 0f) {
                 return o.mRadius;
+            }
+            // A rect with mixed corner radii is a PATH outline; its largest
+            // radius gives a round rect inside it (Outline.macapkPathShadowRadius).
+            if (o.mMode == android.graphics.Outline.MODE_PATH
+                    && o.macapkPathShadowRadius > 0f) {
+                return o.macapkPathShadowRadius;
             }
         } catch (Throwable ignored) {}
         return -1f;
@@ -7187,6 +7221,16 @@ public class View implements android.graphics.drawable.Drawable.Callback,
         if (!android.os.Looper.MACAPK_REAL_LOOPER) return;
         mDrawableStateDirty = true;
         drawableStateChanged();
+        // AOSP View.refreshDrawableState (android14 View.java:23683-23691):
+        //     ViewParent parent = mParent;
+        //     if (parent != null) parent.childDrawableStateChanged(this);
+        // This is how a group with addStatesFromChildren (TextInputLayout and
+        // its inputFrame) learns that its EditText became focused, so the box
+        // stroke and the floating label switch to the focused colors.
+        ViewParent p = parent;
+        if (p != null) {
+            try { p.childDrawableStateChanged(this); } catch (Throwable ignored) {}
+        }
     }
 
     protected int[] onCreateDrawableState(int extraSpace) {

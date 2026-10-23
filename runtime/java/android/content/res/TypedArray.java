@@ -1680,8 +1680,43 @@ public class TypedArray implements AutoCloseable {
         }
         return px != null ? px : def;
     }
-    public int getLayoutDimension(int index, int def)     { return getDimensionPixelSize(index, def); }
-    public int getLayoutDimension(int index, String name) { return 0; }
+    /** AOSP getLayoutDimension: an INT value (the layout_width/height enum, so
+     *  MATCH_PARENT -1 / WRAP_CONTENT -2, or a plain integer) is returned AS IS;
+     *  a dimension is converted to pixels. Our values are the decoded spelling,
+     *  so "match_parent" / "wrap_content" reached the dimension parser, failed,
+     *  and the caller's default came back: ConstraintSet read every
+     *  <Constraint android:layout_width="match_parent"> as 0 (MATCH_CONSTRAINT),
+     *  so a MotionLayout's children solved to zero height -- WhatsApp's Settings
+     *  header, back arrow included, never appeared. The String-named overload
+     *  answered 0 for everything, which is what setBaseAttributes reads. */
+    private static final Integer MACAPK_LAYOUT_DIM_NONE = null;
+    private Integer macapkLayoutDimensionKeyword(int index) {
+        String v = macapkRawValueAt(index);
+        if (v == null) return MACAPK_LAYOUT_DIM_NONE;
+        String t = v.trim();
+        if (t.equals("match_parent") || t.equals("fill_parent")) return -1;
+        if (t.equals("wrap_content")) return -2;
+        if (!t.isEmpty() && (Character.isDigit(t.charAt(0)) || t.charAt(0) == '-')) {
+            boolean digits = true;
+            for (int i = (t.charAt(0) == '-') ? 1 : 0; i < t.length(); i++) {
+                if (!Character.isDigit(t.charAt(i))) { digits = false; break; }
+            }
+            if (digits && t.length() > (t.charAt(0) == '-' ? 1 : 0)) {
+                try { return Integer.parseInt(t); } catch (NumberFormatException ignored) { }
+            }
+        }
+        return MACAPK_LAYOUT_DIM_NONE;
+    }
+    public int getLayoutDimension(int index, int def) {
+        Integer k = macapkLayoutDimensionKeyword(index);
+        return k != null ? k : getDimensionPixelSize(index, def);
+    }
+    public int getLayoutDimension(int index, String name) {
+        // AOSP throws when the attribute is missing; the old stub answered 0,
+        // and that tolerance is kept so a missing value cannot crash a ctor.
+        Integer k = macapkLayoutDimensionKeyword(index);
+        return k != null ? k : getDimensionPixelSize(index, 0);
+    }
     /** AOSP getFraction: value "15%" multiplies `base`; "15%p"
      *  multiplies `pbase`; resolves `@fraction/X` refs first.
      *  ConstraintLayout Guidelines read their percent through this

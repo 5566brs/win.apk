@@ -42,7 +42,10 @@ namespace winapk::host {
 
 namespace {
 
-// Upstream's default phone size (cocoa_bridge.mm), in points.
+// The phone the app is shown, in dp. Upstream's cocoa_bridge.mm starts from
+// 360x640, a 16:9 phone; choose_phone_size() makes it 360x800 (9:20, the most
+// common phone screen today and about the shape upstream's Mac launcher picks)
+// when the screen has room.
 std::atomic<int> g_phone_w{360};
 std::atomic<int> g_phone_h{640};
 std::atomic<jlong> g_next_handle{1};
@@ -98,6 +101,40 @@ public:
         std::fflush(stderr);
         TerminateProcess(GetCurrentProcess(), 0);
     }
+    // ActivityHost.macapkTaskToFront: a no-op unless the app sent its task to
+    // the back. Resolved through the dispatcher's class loader, which is the
+    // one that loaded the runtime's classes.
+    void restored() override {
+        JNIEnv* env = ui_thread_env();
+        if (!env || !g_dispatcher) return;
+        static jclass host = nullptr;
+        static jmethodID to_front = nullptr;
+        if (!host) {
+            jclass dcls = env->GetObjectClass(g_dispatcher);
+            jclass ccls = env->FindClass("java/lang/Class");
+            jmethodID get_loader = env->GetMethodID(ccls, "getClassLoader", "()Ljava/lang/ClassLoader;");
+            jobject loader = env->CallObjectMethod(dcls, get_loader);
+            jclass lcls = env->FindClass("java/lang/ClassLoader");
+            jmethodID load = env->GetMethodID(lcls, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
+            jstring name = env->NewStringUTF("com.macapk.loader.ActivityHost");
+            jobject cls = loader ? env->CallObjectMethod(loader, load, name) : nullptr;
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                cls = nullptr;
+            }
+            if (cls) {
+                host = static_cast<jclass>(env->NewGlobalRef(cls));
+                to_front = env->GetStaticMethodID(host, "macapkTaskToFront", "()V");
+                if (env->ExceptionCheck()) {
+                    env->ExceptionClear();
+                    to_front = nullptr;
+                }
+            }
+        }
+        if (!host || !to_front) return;
+        env->CallStaticVoidMethod(host, to_front);
+        report_input_exception(env);
+    }
 };
 
 JavaInput g_java_input;
@@ -117,6 +154,35 @@ void JNICALL Cocoa_registerTouchDispatcher(JNIEnv* env, jclass, jobject dispatch
 bool headless_requested() {
     const char* e = std::getenv("WINAPK_HEADLESS");
     return e && *e && *e != '0';
+}
+
+// WINAPK_PHONE_SIZE=<width>x<height>, in dp, sets the phone outright.
+// Malformed or out-of-range values are ignored.
+bool apply_phone_size_override() {
+    const char* e = std::getenv("WINAPK_PHONE_SIZE");
+    if (!e || !*e) return false;
+    int w = 0, h = 0;
+    char x = 0;
+    if (std::sscanf(e, "%d%c%d", &w, &x, &h) != 3 || (x != 'x' && x != 'X')) return false;
+    if (w < 200 || h < 200 || w > 4000 || h > 4000) return false;
+    g_phone_w = w;
+    g_phone_h = h;
+    return true;
+}
+
+// 360x800 unless the window would not fit the work area, then as tall as fits,
+// but not shorter than upstream's 640. Apps lay out for today's tall phones:
+// at 640 WhatsApp's welcome screen centres its content up under the top bar,
+// and the content then takes the taps meant for the bar's overflow button.
+void choose_phone_size() {
+    if (apply_phone_size_override()) return;
+    constexpr int kTall = 800, kShort = 640;
+    int h = kTall;
+    if (!headless_requested()) {
+        const int fit = window_max_phone_height();
+        if (fit > 0 && fit < h) h = fit > kShort ? fit : kShort;
+    }
+    g_phone_h = h;
 }
 
 // ---- the app icon -----------------------------------------------------------
@@ -142,6 +208,7 @@ void apply_app_icon() {
 
 jboolean JNICALL Cocoa_init(JNIEnv* env, jclass) {
     env->GetJavaVM(&g_vm);
+    choose_phone_size();
     if (headless_requested()) {
         std::fprintf(stderr, "[win.apk] WINAPK_HEADLESS is set; running without a window\n");
     } else if (!window_start(g_phone_w, g_phone_h, &g_java_input)) {
@@ -218,7 +285,13 @@ bool is_gl_view(jlong view) {
     std::lock_guard<std::mutex> hold(g_gl_views_lock);
     return g_gl_views.count(view) != 0;
 }
-void JNICALL Cocoa_setContentView(JNIEnv*, jclass, jlong, jlong view) { g_content_view = view; }
+void clear_composite_tree();
+void JNICALL Cocoa_setContentView(JNIEnv*, jclass, jlong, jlong view) {
+    // Upstream's overlay layer belongs to the content view, so a new one starts
+    // without the previous tree's frame (a GL game must not sit under the
+    // splash it replaced); the tree that owns the new view presents again.
+    if (g_content_view.exchange(view) != view) clear_composite_tree();
+}
 void JNICALL Cocoa_closeWindow(JNIEnv*, jclass, jlong) {}
 
 // FLAG_SECURE: kept out of screenshots, recording and screen sharing.
@@ -399,6 +472,206 @@ bool guest_live() {
     return last != 0 && GetTickCount64() - last < 500;
 }
 
+// ---- the surface composite ----------------------------------------------------
+//
+// AOSP stacks a window as: a SurfaceView's buffer BELOW the window at the
+// view's rect (APPLICATION_MEDIA_SUBLAYER), the view tree over it -- seen
+// through the transparent hole SurfaceView.draw punches -- and a
+// setZOrderOnTop surface above the tree. Upstream gets that from CALayers (the
+// tree's overlay layer sits above the GL view, each lockCanvas surface has a
+// layer of its own). Here it is one composite of: the content GL view's frame
+// (when the content is one), the lockCanvas surfaces (presentSurfaceBitmap) at
+// the rects their SurfaceViews report, and the view tree's latest frame.
+//
+// Without it, a window whose content had become the shared GL view (a
+// SurfaceView joined the tree after setContentView: a camera preview, a video
+// player) dropped every view-tree frame and showed only the GL view's empty
+// pbuffer, and a surface's own frames went nowhere: WhatsApp's "Link a device"
+// screen was solid black, its "link with phone number" button included.
+struct SurfaceLayer {
+    std::vector<uint32_t> px;
+    int w = 0, h = 0;
+};
+std::mutex g_comp_lock;
+std::map<int, SurfaceLayer> g_surface_layers;
+std::vector<uint32_t> g_comp_tree, g_comp_gl, g_comp_out;
+int g_comp_tree_w = 0, g_comp_tree_h = 0, g_comp_gl_w = 0, g_comp_gl_h = 0;
+std::atomic<bool> g_have_surfaces{false};
+
+jclass g_sv_cls = nullptr;
+jmethodID g_sv_rect = nullptr, g_sv_on_top = nullptr;
+
+void resolve_surface_view_pulls(JNIEnv* env) {
+    static std::once_flag once;
+    std::call_once(once, [env] {
+        jclass local = env->FindClass("android/view/SurfaceView");
+        if (local) {
+            g_sv_cls = static_cast<jclass>(env->NewGlobalRef(local));
+            g_sv_rect = env->GetStaticMethodID(g_sv_cls, "macapkSurfaceRectPacked", "(I)J");
+            g_sv_on_top = env->GetStaticMethodID(g_sv_cls, "macapkSurfaceZOrderOnTop", "(I)Z");
+            env->DeleteLocalRef(local);
+        }
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    });
+}
+
+struct LayerPlace {
+    int key;
+    long long packed;  // 0: the surface is gone; -1: not shown; else x,y,w,h (16 bits each)
+    bool on_top;
+};
+
+// Where each surface is now, asked of its SurfaceView. Outside g_comp_lock: it
+// calls into Java.
+std::vector<LayerPlace> pull_layer_places(JNIEnv* env) {
+    std::vector<LayerPlace> places;
+    if (!g_have_surfaces.load()) return places;
+    {
+        std::lock_guard<std::mutex> hold(g_comp_lock);
+        for (auto& [key, layer] : g_surface_layers) places.push_back({key, -1, false});
+    }
+    resolve_surface_view_pulls(env);
+    for (auto& pl : places) {
+        if (!g_sv_rect) break;
+        pl.packed = env->CallStaticLongMethod(g_sv_cls, g_sv_rect, pl.key);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            pl.packed = -1;
+        }
+        if (pl.packed > 0 && g_sv_on_top) {
+            pl.on_top = env->CallStaticBooleanMethod(g_sv_cls, g_sv_on_top, pl.key) == JNI_TRUE;
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        }
+    }
+    return places;
+}
+
+// Nearest-sampled copy of src (sw x sh) into the rect (x, y, w, h) of dst.
+void blit_scaled(uint32_t* dst, int dw, int dh, const uint32_t* src, int sw, int sh, int x, int y, int w,
+                 int h) {
+    if (w <= 0 || h <= 0 || sw <= 0 || sh <= 0) return;
+    const int y0 = y < 0 ? 0 : y, y1 = (y + h) > dh ? dh : (y + h);
+    const int x0 = x < 0 ? 0 : x, x1 = (x + w) > dw ? dw : (x + w);
+    for (int yy = y0; yy < y1; ++yy) {
+        const uint32_t* srow = src + static_cast<size_t>((yy - y) * sh / h) * sw;
+        uint32_t* drow = dst + static_cast<size_t>(yy) * dw;
+        for (int xx = x0; xx < x1; ++xx) drow[xx] = srow[(xx - x) * sw / w] | 0xff000000u;
+    }
+}
+
+// src ("source over", straight alpha) over dst, both w x h.
+void blend_over(uint32_t* dst, const uint32_t* src, size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+        const uint32_t t = src[i];
+        const uint32_t a = t >> 24;
+        if (a == 255) {
+            dst[i] = t;
+        } else if (a != 0) {
+            const uint32_t g = dst[i];
+            uint32_t px = 0xff000000u;
+            for (int sh = 0; sh <= 16; sh += 8) {
+                const uint32_t c = (((t >> sh) & 0xff) * a + ((g >> sh) & 0xff) * (255 - a)) / 255;
+                px |= c << sh;
+            }
+            dst[i] = px;
+        }
+    }
+}
+
+// Builds the composite from what is stored and presents it. The size is the
+// view tree's (the display surface the layer rects are given in), else the GL
+// frame's.
+void compose_and_present(JNIEnv* env) {
+    const std::vector<LayerPlace> places = pull_layer_places(env);
+    std::lock_guard<std::mutex> hold(g_comp_lock);
+    for (const auto& pl : places) {
+        if (pl.packed == 0) g_surface_layers.erase(pl.key);
+    }
+    g_have_surfaces = !g_surface_layers.empty();
+    const int W = g_comp_tree_w > 0 ? g_comp_tree_w : g_comp_gl_w;
+    const int H = g_comp_tree_w > 0 ? g_comp_tree_h : g_comp_gl_h;
+    if (W <= 0 || H <= 0) return;
+    g_comp_out.assign(static_cast<size_t>(W) * H, 0xff000000u);
+    uint32_t* out = g_comp_out.data();
+    if (!g_comp_gl.empty() && is_gl_view(g_content_view.load())) {
+        blit_scaled(out, W, H, g_comp_gl.data(), g_comp_gl_w, g_comp_gl_h, 0, 0, W, H);
+    }
+    auto draw_layers = [&](bool on_top) {
+        for (const auto& pl : places) {
+            if (pl.packed <= 0 || pl.on_top != on_top) continue;
+            auto it = g_surface_layers.find(pl.key);
+            if (it == g_surface_layers.end() || it->second.px.empty()) continue;
+            const auto u = static_cast<unsigned long long>(pl.packed);
+            const int x = static_cast<int16_t>((u >> 48) & 0xffff), y = static_cast<int16_t>((u >> 32) & 0xffff);
+            const int w = static_cast<int>((u >> 16) & 0xffff), h = static_cast<int>(u & 0xffff);
+            blit_scaled(out, W, H, it->second.px.data(), it->second.w, it->second.h, x, y, w, h);
+        }
+    };
+    draw_layers(false);
+    if (g_comp_tree_w == W && g_comp_tree_h == H && !g_comp_tree.empty()) {
+        blend_over(out, g_comp_tree.data(), g_comp_out.size());
+    }
+    draw_layers(true);
+    present_pixels(out, W, H);
+}
+
+// Whether frames go through the composite: the content is a GL view (the view
+// tree is then its overlay), or a surface has shown a frame.
+bool composite_active() { return is_gl_view(g_content_view.load()) || g_have_surfaces.load(); }
+
+void clear_composite_tree() {
+    std::lock_guard<std::mutex> hold(g_comp_lock);
+    g_comp_tree.clear();
+    g_comp_tree_w = g_comp_tree_h = 0;
+    g_comp_gl.clear();
+    g_comp_gl_w = g_comp_gl_h = 0;
+}
+
+void composite_tree_frame(JNIEnv* env, const uint32_t* argb, int w, int h) {
+    {
+        std::lock_guard<std::mutex> hold(g_comp_lock);
+        g_comp_tree.assign(argb, argb + static_cast<size_t>(w) * h);
+        g_comp_tree_w = w;
+        g_comp_tree_h = h;
+    }
+    compose_and_present(env);
+}
+
+// The content GL view's frame. Alone (no tree overlay, no surfaces) it is
+// presented as before; an unchanged frame is not re-composited.
+void composite_gl_frame(JNIEnv* env, const std::vector<uint32_t>& px, int w, int h) {
+    bool alone;
+    {
+        std::lock_guard<std::mutex> hold(g_comp_lock);
+        alone = g_comp_tree.empty() && g_surface_layers.empty();
+        if (!alone && g_comp_gl_w == w && g_comp_gl_h == h && g_comp_gl == px) return;
+        g_comp_gl = px;
+        g_comp_gl_w = w;
+        g_comp_gl_h = h;
+    }
+    if (alone) {
+        present_pixels(px.data(), w, h);
+        return;
+    }
+    compose_and_present(env);
+}
+
+void JNICALL Cocoa_presentSurfaceBitmap(JNIEnv* env, jclass, jint key, jintArray argb, jint w, jint h) {
+    if (!argb || w <= 0 || h <= 0 || env->GetArrayLength(argb) < w * h) return;
+    jint* px = env->GetIntArrayElements(argb, nullptr);
+    if (!px) return;
+    {
+        std::lock_guard<std::mutex> hold(g_comp_lock);
+        SurfaceLayer& layer = g_surface_layers[key];
+        layer.px.assign(reinterpret_cast<const uint32_t*>(px), reinterpret_cast<const uint32_t*>(px) + static_cast<size_t>(w) * h);
+        layer.w = w;
+        layer.h = h;
+        g_have_surfaces = true;
+    }
+    env->ReleaseIntArrayElements(argb, px, JNI_ABORT);
+    if (!guest_live()) compose_and_present(env);
+}
+
 // The view tree's latest frame, kept for compositing once a guest has shown.
 void keep_tree_frame(const uint32_t* argb, int w, int h) {
     if (g_guest_last_ms.load() == 0) return;
@@ -426,7 +699,7 @@ void gl_tick(JNIEnv* env, jlong view, Renderer& r, jobject callbacks, jmethodID 
     int fw = 0, fh = 0;
     if (ready && !t_tick_withheld && view == g_content_view.load() && !guest_live() &&
         gl_frame_read(&pixels, &fw, &fh)) {
-        present_pixels(pixels.data(), fw, fh);
+        composite_gl_frame(env, pixels, fw, fh);
     }
 }
 
@@ -675,12 +948,15 @@ namespace {
 // tree reaches the window as the overlay layer instead (presentOverlayBitmap).
 void JNICALL Cocoa_presentBitmap(JNIEnv* env, jclass, jintArray argb, jint w, jint h) {
     if (!argb || w <= 0 || h <= 0 || env->GetArrayLength(argb) < w * h) return;
-    if (is_gl_view(g_content_view.load())) return;
     jint* px = env->GetIntArrayElements(argb, nullptr);
     if (!px) return;
     keep_tree_frame(reinterpret_cast<const uint32_t*>(px), w, h);
     // While the app's native code shows frames, its next one brings this along.
-    if (!guest_live()) present_pixels(reinterpret_cast<const uint32_t*>(px), w, h);
+    // With a GL content view or a surface on screen, the tree is their overlay.
+    if (!guest_live()) {
+        if (composite_active()) composite_tree_frame(env, reinterpret_cast<const uint32_t*>(px), w, h);
+        else present_pixels(reinterpret_cast<const uint32_t*>(px), w, h);
+    }
     env->ReleaseIntArrayElements(argb, px, JNI_ABORT);
 }
 
@@ -710,6 +986,7 @@ const HostMethod kMethods[] = {
     WINAPK_HOST_NATIVE(kCls, "exitProcess", "(ILjava/lang/String;)V", Cocoa_exitProcess),
     WINAPK_HOST_NATIVE(kCls, "quitBackstopExit", "()V", Cocoa_quitBackstopExit),
     WINAPK_HOST_NATIVE(kCls, "presentBitmap", "([III)V", Cocoa_presentBitmap),
+    WINAPK_HOST_NATIVE(kCls, "presentSurfaceBitmap", "(I[III)V", Cocoa_presentSurfaceBitmap),
     WINAPK_HOST_NATIVE(kCls, "registerTouchDispatcher", "(Lcom/macapk/loader/TouchDispatcher;)V",
                        Cocoa_registerTouchDispatcher),
     WINAPK_HOST_NATIVE(kCls, "showWindow", "(J)V", Cocoa_showWindow),

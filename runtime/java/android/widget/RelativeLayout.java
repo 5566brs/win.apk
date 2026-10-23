@@ -202,8 +202,9 @@ public class RelativeLayout extends ViewGroup {
      *    - other = the resource ID of the sibling view this rule
      *           references (above/below/alignLeft/etc.).
      *
-     *  AOSP separates "user rules" from "resolved rules" for RTL; we
-     *  collapse to a single array since LTR-only. */
+     *  AOSP separates "user rules" from "resolved rules" for RTL; here
+     *  mRules is the resolved array and mInitialRules keeps the rules as
+     *  set (see resolveLayoutDirection). */
     /** v1.0.1643: AOSP checkLayoutParams, so addView converts a foreign
      *  LayoutParams into this container's own kind (ViewGroup.addView ->
      *  generateLayoutParams). Gate MACAPK_CHECK_LAYOUT_PARAMS=0 restores the old
@@ -260,6 +261,7 @@ public class RelativeLayout extends ViewGroup {
             this.mIsRtlCompatibilityMode = source.mIsRtlCompatibilityMode;
             this.alignWithParent = source.alignWithParent;
             System.arraycopy(source.mRules, 0, this.mRules, 0, VERB_COUNT);
+            if (source.mInitialRules != null) this.mInitialRules = source.mInitialRules.clone();
         }
         public LayoutParams(Context c, android.util.AttributeSet attrs) {
             final int targetSdkVersion = macapkTargetSdkOf(c);
@@ -323,24 +325,45 @@ public class RelativeLayout extends ViewGroup {
         /** addRule(verb): mark a parent-relative or centering rule
          *  with value TRUE (no subject needed). */
         public void addRule(int verb) {
-            if (verb >= 0 && verb < VERB_COUNT) mRules[verb] = TRUE;
+            if (verb >= 0 && verb < VERB_COUNT) {
+                mRules[verb] = TRUE;
+                if (mInitialRules != null) mInitialRules[verb] = TRUE;
+            }
         }
         /** addRule(verb, subject): the subject is either TRUE (-1) for
          *  parent-relative / centering, or a sibling view's ID for
          *  relational rules. */
         public void addRule(int verb, int subject) {
-            if (verb >= 0 && verb < VERB_COUNT) mRules[verb] = subject;
+            if (verb >= 0 && verb < VERB_COUNT) {
+                mRules[verb] = subject;
+                if (mInitialRules != null) mInitialRules[verb] = subject;
+            }
         }
         public void removeRule(int verb) {
-            if (verb >= 0 && verb < VERB_COUNT) mRules[verb] = 0;
+            if (verb >= 0 && verb < VERB_COUNT) {
+                mRules[verb] = 0;
+                if (mInitialRules != null) mInitialRules[verb] = 0;
+            }
         }
+
+        /** AOSP mInitialRules: the rules as the app set them, before START/END
+         *  were folded into LEFT/RIGHT for a direction. Snapshotted on the first
+         *  resolution, so each resolution starts from the app's rules again and
+         *  a direction change re-folds instead of stacking on the last fold. */
+        private int[] mInitialRules;
         public int getRule(int verb) {
             return (verb >= 0 && verb < VERB_COUNT) ? mRules[verb] : 0;
         }
         public int[] getRules() { return mRules; }
         public int[] getRules(int layoutDirection) { return mRules; }
         public void resolveLayoutDirection(int layoutDirection) {
-            // LTR-only: ALIGN_START -> ALIGN_LEFT, ALIGN_PARENT_START ->
+            // AOSP calls super first: start/end MARGINS resolve here too. This
+            // override used to skip it, so a RelativeLayout child's
+            // layout_marginStart/End never followed the direction.
+            super.resolveLayoutDirection(layoutDirection);
+            if (mInitialRules == null) mInitialRules = mRules.clone();
+            System.arraycopy(mInitialRules, 0, mRules, 0, VERB_COUNT);
+            // ALIGN_START -> ALIGN_LEFT, ALIGN_PARENT_START ->
             // ALIGN_PARENT_LEFT (and their END counterparts to RIGHT).
             //
             // AOSP splits this into two halves on mIsRtlCompatibilityMode
@@ -349,9 +372,7 @@ public class RelativeLayout extends ViewGroup {
             // rule fills in a left/right rule ONLY when the absolute rule is
             // unset ("left rule is not defined but start rule is"), whereas from
             // JELLY_BEAN_MR1 the relative rule takes precedence and OVERWRITES
-            // it. The overwrite is what the previous code did unconditionally,
-            // so the modern branch here is literally that code and no app at or
-            // above 17 changes.
+            // it. The modern branch below is that half, RTL included.
             if (mIsRtlCompatibilityMode) {
                 if (mRules[ALIGN_START] != 0 && mRules[ALIGN_LEFT] == 0) {
                     mRules[ALIGN_LEFT] = mRules[ALIGN_START];
@@ -376,12 +397,38 @@ public class RelativeLayout extends ViewGroup {
                 // every app, so it is left alone deliberately.
                 return;
             }
-            if (mRules[ALIGN_START] != 0)        mRules[ALIGN_LEFT]         = mRules[ALIGN_START];
-            if (mRules[ALIGN_END] != 0)          mRules[ALIGN_RIGHT]        = mRules[ALIGN_END];
-            if (mRules[ALIGN_PARENT_START] != 0) mRules[ALIGN_PARENT_LEFT]  = mRules[ALIGN_PARENT_START];
-            if (mRules[ALIGN_PARENT_END] != 0)   mRules[ALIGN_PARENT_RIGHT] = mRules[ALIGN_PARENT_END];
-            if (mRules[START_OF] != 0)           mRules[LEFT_OF]            = mRules[START_OF];
-            if (mRules[END_OF] != 0)             mRules[RIGHT_OF]           = mRules[END_OF];
+            // AOSP resolveRules, JELLY_BEAN_MR1+ half (RelativeLayout.java:1610):
+            // a start/end rule wins over a left/right one on the same axis (the
+            // absolute pair is dropped), and START maps to RIGHT under RTL. This
+            // was LTR-only, so in a Hebrew UI every alignParentStart / toEndOf
+            // layout came out unmirrored -- WhatsApp's conversation header put
+            // the back arrow and avatar on the left and the name to their right.
+            // The relative slots are kept (getRule(START_OF) still answers), as
+            // before; the positioner reads only the absolute ones.
+            final boolean rtl = layoutDirection == android.view.View.LAYOUT_DIRECTION_RTL;
+            if ((mRules[ALIGN_START] != 0 || mRules[ALIGN_END] != 0)
+                    && (mRules[ALIGN_LEFT] != 0 || mRules[ALIGN_RIGHT] != 0)) {
+                mRules[ALIGN_LEFT] = 0;
+                mRules[ALIGN_RIGHT] = 0;
+            }
+            if (mRules[ALIGN_START] != 0) mRules[rtl ? ALIGN_RIGHT : ALIGN_LEFT] = mRules[ALIGN_START];
+            if (mRules[ALIGN_END] != 0)   mRules[rtl ? ALIGN_LEFT : ALIGN_RIGHT] = mRules[ALIGN_END];
+            if ((mRules[START_OF] != 0 || mRules[END_OF] != 0)
+                    && (mRules[LEFT_OF] != 0 || mRules[RIGHT_OF] != 0)) {
+                mRules[LEFT_OF] = 0;
+                mRules[RIGHT_OF] = 0;
+            }
+            if (mRules[START_OF] != 0) mRules[rtl ? RIGHT_OF : LEFT_OF] = mRules[START_OF];
+            if (mRules[END_OF] != 0)   mRules[rtl ? LEFT_OF : RIGHT_OF] = mRules[END_OF];
+            if ((mRules[ALIGN_PARENT_START] != 0 || mRules[ALIGN_PARENT_END] != 0)
+                    && (mRules[ALIGN_PARENT_LEFT] != 0 || mRules[ALIGN_PARENT_RIGHT] != 0)) {
+                mRules[ALIGN_PARENT_LEFT] = 0;
+                mRules[ALIGN_PARENT_RIGHT] = 0;
+            }
+            if (mRules[ALIGN_PARENT_START] != 0)
+                mRules[rtl ? ALIGN_PARENT_RIGHT : ALIGN_PARENT_LEFT] = mRules[ALIGN_PARENT_START];
+            if (mRules[ALIGN_PARENT_END] != 0)
+                mRules[rtl ? ALIGN_PARENT_LEFT : ALIGN_PARENT_RIGHT] = mRules[ALIGN_PARENT_END];
         }
     }
 
@@ -437,7 +484,7 @@ public class RelativeLayout extends ViewGroup {
         for (int i = 0; i < count; i++) {
             View child = getChildAt(i);
             if (child == null || child.getVisibility() == View.GONE) continue;
-            if (child.getLayoutParams() instanceof LayoutParams lp) lp.resolveLayoutDirection(0);
+            if (child.getLayoutParams() instanceof LayoutParams lp) lp.resolveLayoutDirection(getLayoutDirection());
             measureChildWithMargins(child, wSpec, 0, hSpec, 0);
         }
 
@@ -510,6 +557,24 @@ public class RelativeLayout extends ViewGroup {
         final boolean macapkMarginsCountTowardWrapContent = !macapkPreKitKatWrapContent;
         if (widthMode == android.view.View.MeasureSpec.EXACTLY) {
             width = widthSize;
+        } else if (macapkRtlDefault() && myWidth > 0) {
+            // AOSP onMeasure under RTL measures a wrap_content width from the
+            // RIGHT edge the children were positioned against (positionAtEdge):
+            //     width = Math.max(width, myWidth - params.mLeft + params.leftMargin);
+            //     ... width += mPaddingRight;
+            // then shifts every child left by myWidth - width.
+            int maxExtent = padLeft;
+            for (int i = 0; i < count; i++) {
+                View child = getChildAt(i);
+                if (child == null || child.getVisibility() == View.GONE) continue;
+                int lm = (macapkMarginsCountTowardWrapContent
+                        && child.getLayoutParams() instanceof LayoutParams lp)
+                        ? lp.leftMargin : 0;
+                maxExtent = Math.max(maxExtent, myWidth - ml[i] + lm);
+            }
+            width = maxExtent + padRight;
+            width = Math.max(width, getSuggestedMinimumWidth());
+            if (widthMode == android.view.View.MeasureSpec.AT_MOST) width = Math.min(width, widthSize);
         } else {
             int maxRight = padLeft;
             for (int i = 0; i < count; i++) {
@@ -683,6 +748,27 @@ public class RelativeLayout extends ViewGroup {
      *  non-filling child is laid out at the parent's top-left at its measured
      *  size, as AOSP does, instead of being deferred to the equal-vertical-stack
      *  fallback. =0 restores the deferral exactly. */
+    /** AOSP positionChildHorizontal, the default case (both edges unset, no
+     *  CENTER_* rule; android14 RelativeLayout.java:~1095):
+     *      // This is the default case. For RTL we start from the right and for
+     *      // LTR we start from the left. This will give LEFT/TOP for LTR and
+     *      // RIGHT/TOP for RTL.
+     *      if (isLayoutRtl()) {
+     *          params.mRight = myWidth - mPaddingRight - params.rightMargin;
+     *          params.mLeft = params.mRight - child.getMeasuredWidth();
+     *      } else { params.mLeft = mPaddingLeft + params.leftMargin; ... }
+     *  Ours always started from the left, so under an RTL locale every
+     *  rule-less wrap_content child sat on the wrong side: androidx
+     *  Preference titles stayed at the left while their summaries (aligned to
+     *  the title's START edge) went right (pf-notes Settings, Hebrew locale).
+     *  LTR is unchanged. MACAPK_RL_RTL_DEFAULT=0 restores the left start. */
+    private static final boolean MACAPK_RL_RTL_DEFAULT =
+        !"0".equals(System.getenv("MACAPK_RL_RTL_DEFAULT"));
+    private boolean macapkRtlDefault() {
+        if (!MACAPK_RL_RTL_DEFAULT) return false;
+        try { return isLayoutRtl(); } catch (Throwable t) { return false; }
+    }
+
     private static final boolean NORULE_TOPLEFT =
         !"0".equals(System.getenv("MACAPK_RL_NORULE_TOPLEFT"));
 
@@ -892,9 +978,16 @@ public class RelativeLayout extends ViewGroup {
                 // empty wrap_content child would then displace every sibling that
                 // anchors to it.
                 if (leftPos == Integer.MIN_VALUE && rightPos == Integer.MIN_VALUE) {
+                    if (macapkRtlDefault() && !wMatch && parentW > 0) {
+                        // AOSP positionChildHorizontal default case under RTL
+                        // (see macapkRtlDefault): start from the right.
+                        rightPos = parentW - padRight - margR;
+                        leftPos = rightPos - childW;
+                    } else {
                     leftPos = padLeft + margL;
                     rightPos = (wMatch && parentW > 0) ? parentW - padRight - margR
                              : leftPos + childW;
+                    }
                 } else if (leftPos == Integer.MIN_VALUE) {
                     leftPos = rightPos - childW;
                 } else if (rightPos == Integer.MIN_VALUE) {
@@ -1030,8 +1123,8 @@ public class RelativeLayout extends ViewGroup {
                 int margT = (lp != null) ? lp.topMargin    : 0;
                 int margR = (lp != null) ? lp.rightMargin  : 0;
                 int margB = (lp != null) ? lp.bottomMargin : 0;
-                // Resolve START/END to LEFT/RIGHT (LTR-only).
-                if (lp != null) lp.resolveLayoutDirection(0);
+                // Resolve START/END to LEFT/RIGHT for this layout's direction.
+                if (lp != null) lp.resolveLayoutDirection(getLayoutDirection());
 
                 if (passes == 1 && "1".equals(ENV_MACAPK_TRACE_RL)) {
                     com.macapk.loader.NativeLog.i("Mac.apk.RelLayout",
@@ -1112,6 +1205,9 @@ public class RelativeLayout extends ViewGroup {
                         // it never starts"). MACAPK_RL_NORULE_TOPLEFT=0 restores
                         // the deferral exactly.
                         int lpos = padLeft + margL;
+                        if (macapkRtlDefault()) {
+                            lpos = parentW - padRight - margR - Math.max(0, child.getMeasuredWidth());
+                        }
                         int tpos = padTop  + margT;
                         child.layout(lpos, tpos,
                                      lpos + Math.max(0, child.getMeasuredWidth()),
@@ -1261,7 +1357,11 @@ public class RelativeLayout extends ViewGroup {
                 final boolean widthMatchParent  = (lp != null && lp.width  == ViewGroup.LayoutParams.MATCH_PARENT);
                 final boolean heightMatchParent = (lp != null && lp.height == ViewGroup.LayoutParams.MATCH_PARENT);
 
-                if (leftPos == Integer.MIN_VALUE && rightPos == Integer.MIN_VALUE) {
+                if (leftPos == Integer.MIN_VALUE && rightPos == Integer.MIN_VALUE
+                        && macapkRtlDefault() && !widthMatchParent && childW > 0) {
+                    rightPos = parentW - padRight - margR;
+                    leftPos = rightPos - childW;
+                } else if (leftPos == Integer.MIN_VALUE && rightPos == Integer.MIN_VALUE) {
                     leftPos = padLeft + margL;
                     if (widthMatchParent) {
                         rightPos = parentW - padRight - margR;
@@ -1544,9 +1644,9 @@ public class RelativeLayout extends ViewGroup {
             // AOSP reads getRules(v.getLayoutDirection()), which folds
             // START/END into LEFT/RIGHT. A GONE child never reaches the
             // resolve call in the positioning loops (both skip it), so do
-            // it here or its START/END rules stay unresolved. LTR-only,
-            // matching every other resolveLayoutDirection call in this file.
-            alp.resolveLayoutDirection(0);
+            // it here or its START/END rules stay unresolved. Same direction
+            // as every other resolveLayoutDirection call in this file.
+            alp.resolveLayoutDirection(getLayoutDirection());
             final int nextId = alp.mRules[relation];
             if (nextId == 0 || nextId == TRUE) return -1;
             final int nidx = findChildByIdSorted(nextId);

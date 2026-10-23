@@ -54,7 +54,20 @@ bool starts_with(const char* s, const char* prefix) { return std::strncmp(s, pre
 
 std::wstring host_path(const char* p) {
     if (!p) return {};
-    const size_t len = std::strlen(p);
+    size_t len = std::strlen(p);
+    // Guest code that knows no drive letters takes the host paths Java hands
+    // it ("C:\...") for relative ones and joins them onto getcwd() or "/":
+    // SQLite's unixFullPathname yields "C:\cwd/C:\data\x.db" or "/C:\data\x.db".
+    // The last drive-letter path after a separator is the one that was meant.
+    for (size_t i = len; i-- > 2;) {
+        if (p[i] == ':' && i + 1 < len && (p[i + 1] == '\\' || p[i + 1] == '/') &&
+            ((p[i - 1] >= 'A' && p[i - 1] <= 'Z') || (p[i - 1] >= 'a' && p[i - 1] <= 'z')) &&
+            (p[i - 2] == '/' || p[i - 2] == '\\')) {
+            p += i - 1;
+            len -= i - 1;
+            break;
+        }
+    }
     // A host path (drive letter, UNC, relative): as it is.
     if (p[0] != '/' || p[1] == '/') return to_wide(p, len);
     if (std::strcmp(p, "/dev/null") == 0) return L"NUL";

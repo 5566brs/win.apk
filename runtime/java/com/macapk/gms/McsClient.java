@@ -61,6 +61,29 @@ public final class McsClient {
     private static final int TAG_LOGIN_REQUEST = 2, TAG_LOGIN_RESPONSE = 3;
     private static final int TAG_CLOSE = 4, TAG_IQ = 7, TAG_DATA = 8;
 
+    /** The proxy the USER configured for this app, from WINAPK_PROXY
+     *  ("socks5://host:port", set by the launcher), else NO_PROXY. It comes from
+     *  the process environment, which guest code cannot change, so it is not the
+     *  guest-mutable socksProxyHost the TLS-trap note above warns about. */
+    private static final Proxy RUNTIME_PROXY = runtimeProxy();
+
+    private static Proxy runtimeProxy() {
+        String v = System.getenv("WINAPK_PROXY");
+        if (v == null || v.isBlank()) return Proxy.NO_PROXY;
+        try {
+            java.net.URI u = new java.net.URI(v.trim());
+            String scheme = u.getScheme() == null ? "" : u.getScheme().toLowerCase(java.util.Locale.ROOT);
+            if ((scheme.equals("socks5") || scheme.equals("socks")) && u.getHost() != null && u.getPort() > 0) {
+                log("using WINAPK_PROXY " + u.getHost() + ":" + u.getPort());
+                return new Proxy(Proxy.Type.SOCKS, InetSocketAddress.createUnresolved(u.getHost(), u.getPort()));
+            }
+            log("WINAPK_PROXY ignored, expected socks5://host:port: " + v);
+        } catch (Exception e) {
+            log("WINAPK_PROXY ignored (" + e + "): " + v);
+        }
+        return Proxy.NO_PROXY;
+    }
+
     private static final int CONNECT_TIMEOUT_MS = 15_000;
     private static final int READ_TICK_MS = 30_000;      // a deadline tick, not a disconnect
     private static final long HEARTBEAT_MS = 5 * 60_000;  // microG default; server may lower
@@ -284,8 +307,11 @@ public final class McsClient {
         IOException last = null;
         for (int port : PORTS) {
             try {
-                Socket plain = new Socket(Proxy.NO_PROXY);   // ignore the guest-mutable socksProxyHost
-                plain.connect(new InetSocketAddress(HOST, port), CONNECT_TIMEOUT_MS);
+                Socket plain = new Socket(RUNTIME_PROXY);    // ignore the guest-mutable socksProxyHost
+                plain.connect(RUNTIME_PROXY == Proxy.NO_PROXY
+                        ? new InetSocketAddress(HOST, port)
+                        : InetSocketAddress.createUnresolved(HOST, port),   // the proxy resolves it
+                        CONNECT_TIMEOUT_MS);
                 plain.setKeepAlive(true);
                 plain.setTcpNoDelay(true);
                 SSLSocket s = (SSLSocket) factory().createSocket(plain, HOST, port, true);

@@ -2204,7 +2204,7 @@ public final class Boot {
                 // would kill the process, but Mac.apk logs and continues so one
                 // unsupported line in an override cannot cost us the whole launch.
                 try {
-                    android.content.Context appBase = application.getBaseContext();
+                    android.content.Context appBase = macapkRawBaseContext(application);
                     if (appBase != null) {
                         // DIAGNOSTIC (MACAPK_STACK_PAD=<n>, default OFF): dispatch
                         // attachBaseContext through <n> extra nested frames so
@@ -2241,7 +2241,7 @@ public final class Boot {
                         // on it; see Application.java's constructor comment). Put
                         // it back rather than let a single override reintroduce a
                         // fixed bug process-wide.
-                        if (application.getBaseContext() == null) {
+                        if (macapkRawBaseContext(application) == null) {
                             application.macapkAttachBaseContext(appBase);
                             NativeLog.w(TAG, application.getClass().getName()
                                       + ".attachBaseContext nulled the base Context"
@@ -2802,6 +2802,22 @@ public final class Boot {
     // task). Recurses `depth` times before dispatching attachBaseContext, so the
     // app's attachBaseContext (and any executeVM it invokes) runs under a deeper
     // Java call stack. Distinct frame per recursion (real method frames).
+    /** The Application's real base Context (ContextWrapper's private field),
+     *  read directly so an app that overrides getBaseContext() -- WhatsApp's
+     *  AppShell returns null there until its own attachBaseContext runs -- does
+     *  not make Boot skip dispatching attachBaseContext, which would leave the
+     *  app's AppContext unset and every onCreate throwing. Falls back to the
+     *  public getter if the field moves. */
+    private static android.content.Context macapkRawBaseContext(android.app.Application application) {
+        try {
+            java.lang.reflect.Field f = android.content.ContextWrapper.class.getDeclaredField("baseContext");
+            f.setAccessible(true);
+            return (android.content.Context) f.get(application);
+        } catch (Throwable t) {
+            return application.getBaseContext();
+        }
+    }
+
     private static void macapkStackPad(android.app.Application app,
                                        android.content.Context base, int depth) {
         if (depth <= 0) { app.macapkAttachBaseContext(base); return; }
@@ -3680,8 +3696,11 @@ public final class Boot {
                     (android.content.ContentProvider) instance;
                 android.content.pm.ProviderInfo info =
                     new android.content.pm.ProviderInfo();
+                // The STRING a "@string/x" android:authorities names, as AOSP's
+                // parser hands it on (Manifest.ProviderEntry.resolvedAuthorities).
+                final String authorities = entry.resolvedAuthorities(application.getResources());
                 info.name        = entry.name;
-                info.authority   = entry.authorities;
+                info.authority   = authorities;
                 info.packageName = application.getPackageName();
                 info.initOrder   = entry.initOrder;
                 info.exported    = entry.exported;
@@ -3712,9 +3731,9 @@ public final class Boot {
                 // against a content:// URI actually dispatch to this
                 // provider. Manifest-driven (authorities come straight
                 // from android:authorities), so it is app-agnostic.
-                if (entry.authorities != null && !entry.authorities.isEmpty()) {
+                if (authorities != null && !authorities.isEmpty()) {
                     android.content.ContentProviderRegistry.register(
-                        entry.authorities, provider);
+                        authorities, provider);
                 }
             } catch (ClassNotFoundException cnf) {
                 // Many APKs declare optional providers (different

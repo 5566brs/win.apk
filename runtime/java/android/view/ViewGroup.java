@@ -2167,7 +2167,14 @@ public class ViewGroup extends View implements ViewParent, ViewManager {
      *  because addView() had no base method to call virtually. Declaring it is
      *  what makes those overrides reachable at all. */
     protected LayoutParams generateLayoutParams(LayoutParams p) { return p; }
-    public LayoutParams generateDefaultLayoutParams() { return new LayoutParams(); }
+    /** AOSP ViewGroup.generateDefaultLayoutParams: WRAP_CONTENT both ways. It
+     *  returned the no-arg LayoutParams, which is 0x0, so a child added with a
+     *  plain addView(view) to a ViewGroup that does not override this measured
+     *  to nothing: WhatsApp adds its reactions container to the message row
+     *  that way, and no reaction was ever shown under a message. */
+    public LayoutParams generateDefaultLayoutParams() {
+        return new LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
+    }
     /** AOSP ViewGroup.checkLayoutParams: `return p != null;` -- each container
      *  overrides it with `p instanceof Its.LayoutParams`, which is what makes
      *  addView convert a foreign LayoutParams (v1.0.1643; it answered true for
@@ -3015,8 +3022,28 @@ public class ViewGroup extends View implements ViewParent, ViewManager {
                 if (found != null) return found;
             }
         }
+        // Views this group owns but has not attached (ListView's headers and
+        // footers before the first layout), searched after the children as
+        // AOSP ListView.findViewTraversal does.
+        java.util.List<View> owned = macapkUnattachedFindRoots();
+        if (owned != null) {
+            for (View c : owned) {
+                if (c == null) continue;
+                if (c instanceof ViewGroup cvg) {
+                    T found = cvg.findViewByIdRec(searchId, visited);
+                    if (found != null) return found;
+                } else if (visited.put(c, Boolean.TRUE) == null) {
+                    T found = c.findViewById(searchId);
+                    if (found != null) return found;
+                }
+            }
+        }
         return null;
     }
+
+    /** Views a findViewById of this group must also search although they are
+     *  not (yet) its children. None for a plain ViewGroup. */
+    protected java.util.List<View> macapkUnattachedFindRoots() { return null; }
 
     // -------- AOSP-audit batch (v1.0.116) — missing ViewGroup public API --------
 
@@ -3912,9 +3939,58 @@ public class ViewGroup extends View implements ViewParent, ViewManager {
     public void suppressLayout(boolean suppress) { mLayoutSuppressed = suppress; }
     public boolean isLayoutSuppressed() { return mLayoutSuppressed; }
 
+    // AOSP ViewGroup FLAG_ADD_STATES_FROM_CHILDREN (android14 ViewGroup.java):
+    //     public void setAddStatesFromChildren(boolean addsStates) {
+    //         if (addsStates) mGroupFlags |= FLAG_ADD_STATES_FROM_CHILDREN;
+    //         else mGroupFlags &= ~FLAG_ADD_STATES_FROM_CHILDREN;
+    //         refreshDrawableState(); }
+    //     protected int[] onCreateDrawableState(int extraSpace) {
+    //         if ((mGroupFlags & FLAG_ADD_STATES_FROM_CHILDREN) == 0)
+    //             return super.onCreateDrawableState(extraSpace);
+    //         int need = 0; for each child: need += child.getDrawableState().length;
+    //         int[] state = super.onCreateDrawableState(extraSpace + need);
+    //         for each child: state = mergeDrawableStates(state, child.getDrawableState());
+    //         return state; }
+    //     public void childDrawableStateChanged(View child) {
+    //         if ((mGroupFlags & FLAG_ADD_STATES_FROM_CHILDREN) != 0) refreshDrawableState(); }
+    // The flag was stored and never read, so a TextInputLayout never saw its
+    // EditText's state_focused: the outline stayed the idle grey and the
+    // label kept the idle color while the field had focus. AOSP forbids a
+    // duplicateParentState child under such a group (it throws); we skip
+    // those children instead, which also keeps the two mirrors from recursing.
     private boolean mAddStatesFromChildren;
-    public void setAddStatesFromChildren(boolean addsStates) { mAddStatesFromChildren = addsStates; }
+    private boolean mMacapkInChildStateChange;
+    public void setAddStatesFromChildren(boolean addsStates) {
+        mAddStatesFromChildren = addsStates;
+        refreshDrawableState();
+    }
     public boolean addStatesFromChildren() { return mAddStatesFromChildren; }
+    @Override protected int[] onCreateDrawableState(int extraSpace) {
+        if (!mAddStatesFromChildren || !android.os.Looper.MACAPK_REAL_LOOPER) {
+            return super.onCreateDrawableState(extraSpace);
+        }
+        final int n = children.size();
+        int need = 0;
+        int[][] childStates = new int[n][];
+        for (int i = 0; i < n; i++) {
+            View c = children.get(i);
+            if (c == null || c.isDuplicateParentStateEnabled()) continue;
+            int[] cs = c.getDrawableState();
+            childStates[i] = cs;
+            if (cs != null) need += cs.length;
+        }
+        int[] state = super.onCreateDrawableState(extraSpace + need);
+        for (int i = 0; i < n; i++) {
+            if (childStates[i] != null) state = mergeDrawableStates(state, childStates[i]);
+        }
+        return state;
+    }
+    @Override public void childDrawableStateChanged(View child) {
+        if (!mAddStatesFromChildren || mMacapkInChildStateChange) return;
+        if (child != null && child.isDuplicateParentStateEnabled()) return;
+        mMacapkInChildStateChange = true;
+        try { refreshDrawableState(); } finally { mMacapkInChildStateChange = false; }
+    }
 
     private boolean mTouchscreenBlocksFocus;
     public void setTouchscreenBlocksFocus(boolean touchscreenBlocksFocus) {

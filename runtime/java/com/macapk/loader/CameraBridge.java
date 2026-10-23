@@ -109,22 +109,22 @@ public final class CameraBridge {
 
     /** Number of cameras. 0 when there is none, or when access is denied. */
     public static int getDeviceCount() {
-        return isAvailable() ? nativeDeviceCount() : 0;
+        return nat() ? nativeDeviceCount() : VIRTUAL ? Virtual.DeviceCount() : 0;
     }
 
     /** Stable unique id, suitable for use as a camera2 camera id string. */
     public static String getDeviceId(int index) {
-        return isAvailable() ? nativeDeviceId(index) : null;
+        return nat() ? nativeDeviceId(index) : VIRTUAL ? Virtual.DeviceId(index) : null;
     }
 
     /** Human-readable name, e.g. "FaceTime HD Camera". */
     public static String getDeviceName(int index) {
-        return isAvailable() ? nativeDeviceName(index) : null;
+        return nat() ? nativeDeviceName(index) : VIRTUAL ? Virtual.DeviceName(index) : null;
     }
 
     /** One of FACING_*. A Mac's built-in camera faces the user, so FRONT. */
     public static int getDeviceFacing(int index) {
-        return isAvailable() ? nativeDeviceFacing(index) : -1;
+        return nat() ? nativeDeviceFacing(index) : VIRTUAL ? Virtual.DeviceFacing(index) : -1;
     }
 
     /**
@@ -132,35 +132,35 @@ public final class CameraBridge {
      * does not rotate with the device, so no preview rotation is implied.
      */
     public static int getSensorOrientation(int index) {
-        return isAvailable() ? nativeDeviceSensorOrientation(index) : 0;
+        return nat() ? nativeDeviceSensorOrientation(index) : VIRTUAL ? Virtual.DeviceSensorOrientation(index) : 0;
     }
 
     /** Number of (resolution, frame-rate range) entries the device advertises. */
     public static int getFormatCount(int index) {
-        return isAvailable() ? nativeFormatCount(index) : 0;
+        return nat() ? nativeFormatCount(index) : VIRTUAL ? Virtual.FormatCount(index) : 0;
     }
 
     public static int getFormatWidth(int device, int format) {
-        return isAvailable() ? nativeFormatWidth(device, format) : 0;
+        return nat() ? nativeFormatWidth(device, format) : VIRTUAL ? Virtual.FormatWidth(device, format) : 0;
     }
 
     public static int getFormatHeight(int device, int format) {
-        return isAvailable() ? nativeFormatHeight(device, format) : 0;
+        return nat() ? nativeFormatHeight(device, format) : VIRTUAL ? Virtual.FormatHeight(device, format) : 0;
     }
 
     public static double getFormatMinFps(int device, int format) {
-        return isAvailable() ? nativeFormatMinFps(device, format) : 0;
+        return nat() ? nativeFormatMinFps(device, format) : VIRTUAL ? Virtual.FormatMinFps(device, format) : 0;
     }
 
     public static double getFormatMaxFps(int device, int format) {
-        return isAvailable() ? nativeFormatMaxFps(device, format) : 0;
+        return nat() ? nativeFormatMaxFps(device, format) : VIRTUAL ? Virtual.FormatMaxFps(device, format) : 0;
     }
 
     // ---- Authorization ---------------------------------------------------
 
     /** Current TCC authorization: one of AUTH_*. Never prompts, never blocks. */
     public static int getAuthStatus() {
-        return isAvailable() ? nativeAuthStatus() : AUTH_DENIED;
+        return nat() ? nativeAuthStatus() : VIRTUAL ? Virtual.AuthStatus() : AUTH_DENIED;
     }
 
     /**
@@ -186,7 +186,7 @@ public final class CameraBridge {
      *         exist or access is denied. Never blocks indefinitely.
      */
     public static long open(int index) {
-        return isAvailable() ? nativeOpen(index) : NO_SESSION;
+        return nat() ? nativeOpen(index) : VIRTUAL ? Virtual.Open(index) : NO_SESSION;
     }
 
     /**
@@ -197,30 +197,30 @@ public final class CameraBridge {
      * {@link #getHeight} -- those are what the app will actually receive.
      */
     public static boolean configure(long session, int width, int height, int fps) {
-        return session != NO_SESSION && nativeConfigure(session, width, height, fps);
+        return session != NO_SESSION && (session < 0 ? Virtual.Configure(session, width, height, fps) : nativeConfigure(session, width, height, fps));
     }
 
     /** Negotiated width. Valid after configure(); this is the truth, not the request. */
     public static int getWidth(long session) {
-        return session == NO_SESSION ? 0 : nativeWidth(session);
+        return session == NO_SESSION ? 0 : session < 0 ? Virtual.Width(session) : nativeWidth(session);
     }
 
     /** Negotiated height. */
     public static int getHeight(long session) {
-        return session == NO_SESSION ? 0 : nativeHeight(session);
+        return session == NO_SESSION ? 0 : session < 0 ? Virtual.Height(session) : nativeHeight(session);
     }
 
     public static boolean start(long session) {
-        return session != NO_SESSION && nativeStart(session);
+        return session != NO_SESSION && (session < 0 ? Virtual.Start(session) : nativeStart(session));
     }
 
     public static void stop(long session) {
-        if (session != NO_SESSION) nativeStop(session);
+        if (session < 0) Virtual.Stop(session); else if (session != NO_SESSION) nativeStop(session);
     }
 
     /** Tear down. Releases any held frame first, so it is safe to call anytime. */
     public static void close(long session) {
-        if (session != NO_SESSION) nativeClose(session);
+        if (session < 0) Virtual.Close(session); else if (session != NO_SESSION) nativeClose(session);
     }
 
     /**
@@ -230,7 +230,7 @@ public final class CameraBridge {
      * assuming a started session is producing frames.
      */
     public static long framesDelivered(long session) {
-        return session == NO_SESSION ? 0L : nativeFramesDelivered(session);
+        return session == NO_SESSION ? 0L : session < 0 ? Virtual.FramesDelivered(session) : nativeFramesDelivered(session);
     }
 
     // ---- Frame handoff ---------------------------------------------------
@@ -243,12 +243,12 @@ public final class CameraBridge {
      *         Must be paired with {@link #release} in a finally block.
      */
     public static boolean acquire(long session) {
-        return session != NO_SESSION && nativeAcquire(session);
+        return session != NO_SESSION && (session < 0 ? Virtual.Acquire(session) : nativeAcquire(session));
     }
 
     /** Release the acquired frame. All its plane buffers die here. */
     public static void release(long session) {
-        if (session != NO_SESSION) nativeRelease(session);
+        if (session < 0) Virtual.Release(session); else if (session != NO_SESSION) nativeRelease(session);
     }
 
     /**
@@ -265,12 +265,12 @@ public final class CameraBridge {
      * <p>Valid only until {@link #release}. Null when no frame is held.
      */
     public static ByteBuffer planeBuffer(long session, int plane) {
-        return session == NO_SESSION ? null : nativePlaneBuffer(session, plane);
+        return session == NO_SESSION ? null : session < 0 ? Virtual.PlaneBuffer(session, plane) : nativePlaneBuffer(session, plane);
     }
 
     /** Bytes between the starts of consecutive rows -- Plane.getRowStride(). */
     public static int rowStride(long session, int plane) {
-        return session == NO_SESSION ? 0 : nativeRowStride(session, plane);
+        return session == NO_SESSION ? 0 : session < 0 ? Virtual.RowStride(session, plane) : nativeRowStride(session, plane);
     }
 
     /**
@@ -278,7 +278,7 @@ public final class CameraBridge {
      * 1 for the Y plane and 2 for both chroma planes on this backend.
      */
     public static int pixelStride(long session, int plane) {
-        return session == NO_SESSION ? 0 : nativePixelStride(session, plane);
+        return session == NO_SESSION ? 0 : session < 0 ? Virtual.PixelStride(session, plane) : nativePixelStride(session, plane);
     }
 
     /**
@@ -287,12 +287,12 @@ public final class CameraBridge {
      * TIMESTAMP_SOURCE_UNKNOWN contract, so that is what should be reported.
      */
     public static long frameTimestamp(long session) {
-        return session == NO_SESSION ? 0L : nativeFrameTimestamp(session);
+        return session == NO_SESSION ? 0L : session < 0 ? Virtual.FrameTimestamp(session) : nativeFrameTimestamp(session);
     }
 
     /** Monotonically increasing counter of ACQUIRED frames (not delivered ones). */
     public static long frameNumber(long session) {
-        return session == NO_SESSION ? 0L : nativeFrameNumber(session);
+        return session == NO_SESSION ? 0L : session < 0 ? Virtual.FrameNumber(session) : nativeFrameNumber(session);
     }
 
     // ---- Newest-frame RGBA copy (the SurfaceTexture consumer path) -------
@@ -312,7 +312,7 @@ public final class CameraBridge {
     /** PTS (ns) of the newest delivered frame, 0 when none has arrived.
      *  Advances with every delivery; cheap enough to poll. */
     public static long latestFrameTimestamp(long session) {
-        return session == NO_SESSION ? 0L : nativeLatestTimestamp(session);
+        return session == NO_SESSION ? 0L : session < 0 ? Virtual.LatestTimestamp(session) : nativeLatestTimestamp(session);
     }
 
     /**
@@ -328,7 +328,7 @@ public final class CameraBridge {
      *         arrived or the buffer is too small
      */
     public static long copyLatestRgba(long session, ByteBuffer dst, int[] dims) {
-        return session == NO_SESSION ? 0L : nativeCopyLatestRgba(session, dst, dims);
+        return session == NO_SESSION ? 0L : session < 0 ? Virtual.CopyLatestRgba(session, dst, dims) : nativeCopyLatestRgba(session, dst, dims);
     }
 
     /**
@@ -336,7 +336,179 @@ public final class CameraBridge {
      * alpha always 0xFF). dst length is in pixels.
      */
     public static long copyLatestArgb(long session, int[] dst, int[] dims) {
-        return session == NO_SESSION ? 0L : nativeCopyLatestArgb(session, dst, dims);
+        return session == NO_SESSION ? 0L : session < 0 ? Virtual.CopyLatestArgb(session, dst, dims) : nativeCopyLatestArgb(session, dst, dims);
+    }
+
+    // ---- Virtual camera (Win.apk) ------------------------------------------
+    //
+    // The Windows host has no capture engine behind these natives (the Mac one
+    // is camera_capture.mm), so every app saw ZERO cameras -- and apps whose
+    // screen IS a camera preview refuse to open that screen at all. WhatsApp's
+    // Settings > Linked devices > Link a device toasts "can't start the camera,
+    // restart the device" and finishes, which also hides the "link with phone
+    // number instead" button that lives on the same screen and needs no camera.
+    //
+    // When the natives are not bound, a single virtual back camera is reported
+    // instead: it opens, negotiates a real size, and delivers dark-grey NV12
+    // frames at 30 fps, so preview screens stay up and their camera-free
+    // controls work. MACAPK_VIRTUAL_CAMERA=0 restores the old "no camera".
+    // Virtual session handles are negative, so they never collide with a native
+    // pointer and the session-level calls dispatch on the sign alone.
+    private static final boolean VIRTUAL =
+            !"0".equals(System.getenv("MACAPK_VIRTUAL_CAMERA"));
+
+    // The Windows host binds every unimplemented native to a stub that returns
+    // 0 ("native not implemented on Windows yet"), so isAvailable() is true
+    // there and nativeDeviceCount() answers 0. "Bound but no device" therefore
+    // falls through to the virtual camera too. Re-checked at most every 2 s so
+    // a camera that appears later (a native backend, a USB webcam) wins.
+    private static volatile long sNativeCheckedAt;
+    private static volatile boolean sNativeHasDevices;
+    private static boolean nat() {
+        if (!isAvailable()) return false;
+        if (!VIRTUAL) return true;
+        long now = System.nanoTime();
+        if (sNativeCheckedAt == 0 || now - sNativeCheckedAt > 2_000_000_000L) {
+            sNativeHasDevices = nativeDeviceCount() > 0;
+            sNativeCheckedAt = now;
+        }
+        return sNativeHasDevices;
+    }
+
+    static final class Virtual {
+        private Virtual() {}
+        private static final int[][] FORMATS = { {1280, 720}, {640, 480} };
+        private static final long FRAME_NS = 33_333_333L;
+        private static final byte LUMA = 0x28;
+
+        private static final class S {
+            int w = 1280, h = 720;
+            volatile long startNs;           // 0 = stopped
+            boolean held;
+            long lastIndex = -1, acquired, heldIndex;
+            java.nio.ByteBuffer y, uv;
+        }
+        private static final java.util.concurrent.ConcurrentHashMap<Long, S> SESSIONS =
+                new java.util.concurrent.ConcurrentHashMap<>();
+        private static final java.util.concurrent.atomic.AtomicLong NEXT =
+                new java.util.concurrent.atomic.AtomicLong(-1);
+
+        static int DeviceCount() { return 1; }
+        static String DeviceId(int i) { return i == 0 ? "winapk-virtual-0" : null; }
+        static String DeviceName(int i) { return i == 0 ? "Win.apk Virtual Camera" : null; }
+        static int DeviceFacing(int i) { return i == 0 ? FACING_BACK : -1; }
+        static int DeviceSensorOrientation(int i) { return 0; }
+        static int FormatCount(int i) { return i == 0 ? FORMATS.length : 0; }
+        static int FormatWidth(int d, int f) { return d == 0 && f >= 0 && f < FORMATS.length ? FORMATS[f][0] : 0; }
+        static int FormatHeight(int d, int f) { return d == 0 && f >= 0 && f < FORMATS.length ? FORMATS[f][1] : 0; }
+        static double FormatMinFps(int d, int f) { return 15; }
+        static double FormatMaxFps(int d, int f) { return 30; }
+        static int AuthStatus() { return AUTH_AUTHORIZED; }
+
+        static long Open(int index) {
+            if (index != 0) return NO_SESSION;
+            long id = NEXT.getAndDecrement();
+            SESSIONS.put(id, new S());
+            return id;
+        }
+        static boolean Configure(long session, int w, int h, int fps) {
+            S s = SESSIONS.get(session);
+            if (s == null) return false;
+            long want = (long) Math.max(w, 1) * Math.max(h, 1);
+            int[] best = FORMATS[0];
+            for (int[] f : FORMATS)
+                if (Math.abs((long) f[0] * f[1] - want) < Math.abs((long) best[0] * best[1] - want)) best = f;
+            synchronized (s) { s.w = best[0]; s.h = best[1]; s.y = null; s.uv = null; }
+            return true;
+        }
+        static int Width(long session) { S s = SESSIONS.get(session); return s == null ? 0 : s.w; }
+        static int Height(long session) { S s = SESSIONS.get(session); return s == null ? 0 : s.h; }
+        static boolean Start(long session) {
+            S s = SESSIONS.get(session);
+            if (s == null) return false;
+            if (s.startNs == 0) s.startNs = System.nanoTime();
+            return true;
+        }
+        static void Stop(long session) { S s = SESSIONS.get(session); if (s != null) s.startNs = 0; }
+        static void Close(long session) { SESSIONS.remove(session); }
+
+        private static long index(S s) {
+            long st = s.startNs;
+            return st == 0 ? -1 : (System.nanoTime() - st) / FRAME_NS;
+        }
+        static long FramesDelivered(long session) {
+            S s = SESSIONS.get(session);
+            return s == null ? 0 : Math.max(0, index(s) + 1);
+        }
+        static boolean Acquire(long session) {
+            S s = SESSIONS.get(session);
+            if (s == null) return false;
+            synchronized (s) {
+                long i = index(s);
+                if (s.held || i < 0 || i <= s.lastIndex) return false;
+                if (s.y == null) {
+                    s.y = java.nio.ByteBuffer.allocateDirect(s.w * s.h);
+                    while (s.y.hasRemaining()) s.y.put(LUMA);
+                    s.y.clear();
+                    s.uv = java.nio.ByteBuffer.allocateDirect(s.w * (s.h / 2));
+                    while (s.uv.hasRemaining()) s.uv.put((byte) 0x80);
+                    s.uv.clear();
+                }
+                s.lastIndex = i; s.heldIndex = i; s.held = true; s.acquired++;
+                return true;
+            }
+        }
+        static void Release(long session) {
+            S s = SESSIONS.get(session);
+            if (s != null) synchronized (s) { s.held = false; }
+        }
+        static java.nio.ByteBuffer PlaneBuffer(long session, int plane) {
+            S s = SESSIONS.get(session);
+            if (s == null) return null;
+            synchronized (s) {
+                if (!s.held || s.y == null) return null;
+                if (plane == 0) return s.y.duplicate();
+                java.nio.ByteBuffer c = s.uv.duplicate();
+                if (plane == 2) c.position(1);
+                return c.slice();
+            }
+        }
+        static int RowStride(long session, int plane) { S s = SESSIONS.get(session); return s == null ? 0 : s.w; }
+        static int PixelStride(long session, int plane) { return plane == 0 ? 1 : 2; }
+        static long FrameTimestamp(long session) {
+            S s = SESSIONS.get(session);
+            return s == null || s.startNs == 0 ? 0 : s.startNs + s.heldIndex * FRAME_NS;
+        }
+        static long FrameNumber(long session) { S s = SESSIONS.get(session); return s == null ? 0 : s.acquired; }
+        static long LatestTimestamp(long session) {
+            S s = SESSIONS.get(session);
+            if (s == null) return 0;
+            long i = index(s);
+            return i < 0 ? 0 : Math.max(1, s.startNs + i * FRAME_NS);
+        }
+        static long CopyLatestRgba(long session, java.nio.ByteBuffer dst, int[] dims) {
+            S s = SESSIONS.get(session);
+            if (s == null || dims == null || dims.length < 2) return 0;
+            long ts = LatestTimestamp(session);
+            if (ts == 0) return 0;
+            dims[0] = s.w; dims[1] = s.h;
+            int n = s.w * s.h;
+            if (dst == null || dst.capacity() < n * 4) return 0;
+            java.nio.ByteBuffer d = dst.duplicate(); d.clear();
+            for (int i = 0; i < n; i++) { d.put(LUMA); d.put(LUMA); d.put(LUMA); d.put((byte) 0xFF); }
+            return ts;
+        }
+        static long CopyLatestArgb(long session, int[] dst, int[] dims) {
+            S s = SESSIONS.get(session);
+            if (s == null || dims == null || dims.length < 2) return 0;
+            long ts = LatestTimestamp(session);
+            if (ts == 0) return 0;
+            dims[0] = s.w; dims[1] = s.h;
+            int n = s.w * s.h;
+            if (dst == null || dst.length < n) return 0;
+            java.util.Arrays.fill(dst, 0, n, 0xFF000000 | (LUMA << 16) | (LUMA << 8) | LUMA);
+            return ts;
+        }
     }
 
     // ---- natives ---------------------------------------------------------

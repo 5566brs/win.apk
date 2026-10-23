@@ -468,6 +468,33 @@ WINAPK_GUEST_ABI long double g_wcstold(const wchar32* s, wchar32** e) {
     return wide_number<long double>(s, e, [](const char* n, char** x) { return std::strtold(n, x); });
 }
 
+// Bionic's _ctype_ (OpenBSD gen/ctype_.c): a pointer to a 1 + 256 entry class
+// table indexed by c + 1. Guest code built against Bionic's <ctype.h> inlines
+// it (isalnum is `_ctype_[c + 1] & (_U|_L|_N)`), so a zeroed stand-in is a null
+// pointer and the first classified character faults. Upper 128 entries are 0.
+constexpr char kCtU = 0x01, kCtL = 0x02, kCtN = 0x04, kCtS = 0x08, kCtP = 0x10, kCtC = 0x20, kCtX = 0x40,
+               kCtB = static_cast<char>(0x80);
+const char g_c_ctype[1 + 256] = {
+    0,
+    kCtC, kCtC, kCtC, kCtC, kCtC, kCtC, kCtC, kCtC,
+    kCtC, kCtC | kCtS, kCtC | kCtS, kCtC | kCtS, kCtC | kCtS, kCtC | kCtS, kCtC, kCtC,
+    kCtC, kCtC, kCtC, kCtC, kCtC, kCtC, kCtC, kCtC,
+    kCtC, kCtC, kCtC, kCtC, kCtC, kCtC, kCtC, kCtC,
+    kCtS | kCtB, kCtP, kCtP, kCtP, kCtP, kCtP, kCtP, kCtP,
+    kCtP, kCtP, kCtP, kCtP, kCtP, kCtP, kCtP, kCtP,
+    kCtN, kCtN, kCtN, kCtN, kCtN, kCtN, kCtN, kCtN,
+    kCtN, kCtN, kCtP, kCtP, kCtP, kCtP, kCtP, kCtP,
+    kCtP, kCtU | kCtX, kCtU | kCtX, kCtU | kCtX, kCtU | kCtX, kCtU | kCtX, kCtU | kCtX, kCtU,
+    kCtU, kCtU, kCtU, kCtU, kCtU, kCtU, kCtU, kCtU,
+    kCtU, kCtU, kCtU, kCtU, kCtU, kCtU, kCtU, kCtU,
+    kCtU, kCtU, kCtU, kCtP, kCtP, kCtP, kCtP, kCtP,
+    kCtP, kCtL | kCtX, kCtL | kCtX, kCtL | kCtX, kCtL | kCtX, kCtL | kCtX, kCtL | kCtX, kCtL,
+    kCtL, kCtL, kCtL, kCtL, kCtL, kCtL, kCtL, kCtL,
+    kCtL, kCtL, kCtL, kCtL, kCtL, kCtL, kCtL, kCtL,
+    kCtL, kCtL, kCtL, kCtP, kCtP, kCtP, kCtP, kCtC,
+};
+const char* g_ctype = g_c_ctype;
+
 const ShimSymbol kSymbols[] = {
     WINAPK_SHIM("setlocale", g_setlocale),
     WINAPK_SHIM("newlocale", g_newlocale),
@@ -476,6 +503,7 @@ const ShimSymbol kSymbols[] = {
     WINAPK_SHIM("uselocale", g_uselocale),
     WINAPK_SHIM("localeconv", g_localeconv),
     WINAPK_SHIM("__ctype_get_mb_cur_max", g_ctype_get_mb_cur_max),
+    {"_ctype_", &g_ctype},
     WINAPK_SHIM("mbrtowc", g_mbrtowc),
     WINAPK_SHIM("mbrlen", g_mbrlen),
     WINAPK_SHIM("mbtowc", g_mbtowc),

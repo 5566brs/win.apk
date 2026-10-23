@@ -27,6 +27,9 @@ public:
     virtual void key(int action, int key_code, int unicode, int meta) = 0;
     // The user closed the window.
     virtual void close_requested() = 0;
+    // The window came back from being minimized (taskbar, Alt+Tab): upstream's
+    // unhide observer, which brings back a task the app sent to the back.
+    virtual void restored() {}
 };
 
 // Creates the window (hidden) for a phone of phone_w by phone_h points.
@@ -37,6 +40,10 @@ bool window_running();
 void window_show();
 void window_set_title(const std::string& utf8);
 void window_set_phone_size(int phone_w, int phone_h);
+
+// The tallest phone, in dp, whose window fits the primary monitor's work area
+// at the system DPI; 0 when that cannot be found out.
+int window_max_phone_height();
 // The app moved its task to the back or front (Activity.moveTaskToBack).
 // The app window, for dialogs it owns (nullptr headless or before start).
 void* window_handle();

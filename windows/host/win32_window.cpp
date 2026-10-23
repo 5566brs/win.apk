@@ -271,6 +271,19 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_CLOSE:
             g_input->close_requested();
             return 0;
+        case WM_SIZE: {
+            // BACK at the task root minimizes the window (moveTaskToBack) and
+            // stops the top activity; un-minimizing must resume it, or every
+            // touch after that goes to no activity at all.
+            static bool minimized = false;
+            if (wp == SIZE_MINIMIZED) {
+                minimized = true;
+            } else if (minimized && (wp == SIZE_RESTORED || wp == SIZE_MAXIMIZED)) {
+                minimized = false;
+                g_input->restored();
+            }
+            break;
+        }
         default:
             break;
     }
@@ -296,6 +309,15 @@ DWORD WINAPI ui_thread(void* param) {
     const SIZE s = outer_size(nullptr, style);
     g_hwnd = CreateWindowExW(0, kClassName, L"Win.apk", style, CW_USEDEFAULT, CW_USEDEFAULT, s.cx, s.cy, nullptr,
                              nullptr, wc.hInstance, nullptr);
+    // CW_USEDEFAULT cascades the window down the screen; keep its bottom edge
+    // on the work area, which the phone height was chosen to fit.
+    RECT wr{}, wa{};
+    if (g_hwnd && GetWindowRect(g_hwnd, &wr) && SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0) &&
+        wr.bottom > wa.bottom) {
+        const int y = wa.bottom - (wr.bottom - wr.top);
+        SetWindowPos(g_hwnd, nullptr, wr.left, y > wa.top ? y : wa.top, 0, 0,
+                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
     args->ok = g_hwnd != nullptr;
     SetEvent(args->ready);
     if (!g_hwnd) return 1;
@@ -430,6 +452,16 @@ void window_set_title(const std::string& utf8) {
     std::wstring w(static_cast<size_t>(n > 0 ? n : 1), L'\0');
     MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, &w[0], n);
     SetWindowTextW(g_hwnd, w.c_str());  // sends to the UI thread
+}
+
+int window_max_phone_height() {
+    enable_dpi_awareness();
+    RECT wa{};
+    if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0)) return 0;
+    RECT frame{0, 0, 0, 0};
+    AdjustWindowRectEx(&frame, WS_OVERLAPPEDWINDOW, FALSE, 0);
+    const int avail = (wa.bottom - wa.top) - (frame.bottom - frame.top);
+    return avail > 0 ? MulDiv(avail, 96, static_cast<int>(window_dpi(nullptr))) : 0;
 }
 
 void window_set_phone_size(int phone_w, int phone_h) {
