@@ -5505,6 +5505,43 @@ public class LayoutInflater {
             } catch (Throwable ignored) {}
             return s.substring("@string/".length());  // best-effort literal
         }
+        // A PLATFORM string (`android:text="@android:string/cancel"`, compiled as
+        // @0x01040000): AOSP's TypedArray.getText resolves it from framework-res
+        // like any other. This returned the reference itself, so NoNonsense
+        // Notes' list dialog buttons read "@ANDROID:STRING/CANCEL" and
+        // "@ANDROID:STRING/OK" (textAllCaps). Resources.getString already
+        // serves 0x0104xxxx (ResourceIndex.stringForId); this only has to
+        // turn the name back into its id.
+        if (s.startsWith("@android:string/")) {
+            final String fwName = s.substring("@android:string/".length());
+            final String platform = macapkPlatformString(fwName);
+            if (platform != null) return platform;
+            // public-final.xml ids of the strings ResourceIndex's frozen table
+            // serves when the platform table is gated off (getIdentifier
+            // cannot name them then).
+            int id = 0;
+            switch (fwName) {
+                case "cancel": id = 0x01040000; break;
+                case "copy": id = 0x01040001; break;
+                case "cut": id = 0x01040003; break;
+                case "no": id = 0x01040009; break;
+                case "ok": id = 0x0104000a; break;
+                case "paste": id = 0x0104000b; break;
+                case "search_go": id = 0x0104000c; break;
+                case "selectAll": id = 0x0104000d; break;
+                case "untitled": id = 0x0104000f; break;
+                case "yes": id = 0x01040013; break;
+                case "dialog_alert_title": id = 0x01040014; break;
+                default: break;
+            }
+            if (id != 0 && context != null) {
+                try {
+                    android.content.res.Resources r = context.getResources();
+                    CharSequence resolved = r != null ? r.getText(id) : null;
+                    if (resolved != null && resolved.length() > 0) return resolved.toString();
+                } catch (Throwable ignored) {}
+            }
+        }
         return s;
     }
 
