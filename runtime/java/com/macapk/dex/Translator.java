@@ -791,6 +791,12 @@ public final class Translator {
             final java.util.TreeMap<Integer, CodeWriter.Label> portals = new java.util.TreeMap<>();
             /** Try blocks whose range and handlers both live in this part. */
             List<TypeInference.TryBlock> tries = java.util.Collections.emptyList();
+            /** Handler DEX offset -> this part's COPY of a handler that lives in
+             *  another part (MethodSplitter.CLONE_HANDLERS). Kept apart from
+             *  {@link #labels} for the reason portals are: the offset is not
+             *  this part's, and a range end must never bind to it. */
+            final java.util.TreeMap<Integer, CodeWriter.Label> cloneLabels =
+                    new java.util.TreeMap<>();
 
             PartState(int index, CodeWriter writer, MethodSplitter.Part part) {
                 this.index = index;
@@ -840,6 +846,13 @@ public final class Translator {
                     if (incumbent == null || betterFrameSource(this, dexOffset, incumbent)) {
                         bytecodeToDex.put(l.offset, dexOffset);
                     }
+                }
+                // A handler copy's pc is that handler's program point: its frame
+                // is the handler's own (locals at the handler, the exception on
+                // the stack), whatever else happens to share the bytecode offset.
+                for (Map.Entry<Integer, CodeWriter.Label> e : cloneLabels.entrySet()) {
+                    CodeWriter.Label l = e.getValue();
+                    if (l.offset >= 0) bytecodeToDex.put(l.offset, e.getKey());
                 }
             }
         }
@@ -989,6 +1002,10 @@ public final class Translator {
             locals = Locals.allocate(types, norm, code.registersSize(), argSlotCount());
             lastNorm = norm;
             allTries = tries;
+            if (ConstReadingElision.armed()) {
+                deadConstReadings = ConstReadingElision.plan(norm, types, tries,
+                        branchTargets(tries), elisionBarriers(), decoded);
+            }
 
             if (split != null) { runSplit(norm, tries); return; }
 
@@ -1027,6 +1044,30 @@ public final class Translator {
             // uncovered by any handler, so it has no branch target and therefore
             // needs no StackMapTable at all (JVMS 4.10.1).
             mainWriter.setFrameProvider(cur);
+        }
+
+        /**
+         * DEX offset -> scalars of that const whose store is dead, or null when
+         * ConstReadingElision is not armed (every ordinary translation).
+         */
+        Map<Integer, Integer> deadConstReadings;
+
+        /** Offsets where an outline chunk or a split part begins or ends, and
+         *  MonitorCover stub sites: locals are read there in ways it.uses does
+         *  not describe, so an elision window must not cross one. */
+        java.util.Set<Integer> elisionBarriers() {
+            java.util.Set<Integer> b = new HashSet<>();
+            if (outline != null) {
+                for (MethodOutliner.Chunk c : outline.chunks()) {
+                    b.add(c.startOffset);
+                    b.add(c.endOffset);
+                }
+            }
+            if (split != null) {
+                for (MethodSplitter.Part p : split.parts()) b.add(p.startOffset);
+            }
+            if (coverPlan != null) b.addAll(coverPlan.stub.keySet());
+            return b;
         }
 
         /** The normalized stream the emitted body came from, for planOutlining. */
@@ -1667,6 +1708,17 @@ public final class Translator {
                     beginPart(next, tries);
                     last = null;
                 }
+                Integer copied = split.clonedHandlerContaining(insn.offset);
+                if (copied != null && !partUsesHandler(copied)) {
+                    // A cloned handler whose own part has no range using it:
+                    // every range that does has its copy, and nothing else can
+                    // enter the block, so the original would be dead code --
+                    // and dead code after a throw still needs a frame, which a
+                    // handler with no row in this part's table cannot supply.
+                    bindRangeEndsUpTo(insn.offset);
+                    last = insn;
+                    continue;
+                }
                 out.mark(labelFor(insn.offset));
                 bindRangeEndsUpTo(insn.offset);
                 last = insn;
@@ -1709,6 +1761,56 @@ public final class Translator {
         }
 
         /**
+         * Lay down this part's copy of every cloned handler its ranges use but
+         * another part holds (MethodSplitter.CLONE_HANDLERS). Runs after
+         * bindRangeEndsUpTo and the portals, so a copy sits outside every
+         * range of the part, as a handler body must not be covered by the
+         * range it serves. The planner guarantees the block is a straight line
+         * ending in throw or return that only an exception edge enters, so the
+         * copy needs no label but its first, and the frame there is the
+         * handler's own (frameFor via cloneLabels / handlerEntryTypes).
+         */
+        void emitHandlerClones() {
+            if (split == null) return;
+            java.util.TreeSet<Integer> need = new java.util.TreeSet<>();
+            for (TypeInference.TryBlock t : cur.tries) {
+                for (TypeInference.Catch c : t.catches) {
+                    int h = c.handlerOffset;
+                    if (split.cloneBlock(h) == null || !types.isReachable(h)) continue;
+                    if (split.partIndexOf(h) != cur.index) need.add(h);
+                }
+            }
+            if (need.isEmpty()) return;
+            Map<Integer, TypeInference.Insn> byOffset = new HashMap<>();
+            for (TypeInference.Insn in : lastNorm) byOffset.put(in.offset, in);
+            for (int h : need) {
+                CodeWriter.Label l = out.newLabel("handler-copy@0x" + Integer.toHexString(h));
+                labelOwner.put(l, out);
+                out.mark(l);
+                cur.cloneLabels.put(h, l);
+                cur.handlerEntryTypes.put(h, handlerTypes.get(h));
+                for (int o : split.cloneBlock(h)) {
+                    TypeInference.Insn insn = byOffset.get(o);
+                    if (insn == null) {
+                        throw new TranslationException("handler copy: no instruction at 0x"
+                                + Integer.toHexString(o));
+                    }
+                    emitOne(insn, types.typesFor(o));
+                }
+            }
+        }
+
+        /** True when a range of the CURRENT part names this handler. */
+        boolean partUsesHandler(int handlerOffset) {
+            for (TypeInference.TryBlock t : cur.tries) {
+                for (TypeInference.Catch c : t.catches) {
+                    if (c.handlerOffset == handlerOffset) return true;
+                }
+            }
+            return false;
+        }
+
+        /**
          * Close the part being emitted: bind what is still open, then lay down
          * the pieces that must sit OUTSIDE every try range -- the handler stubs
          * and the portals.
@@ -1732,6 +1834,7 @@ public final class Translator {
             markEndOfCode();
             emitHandlerStubs(partHandlerOffsets());
             emitPortals();
+            emitHandlerClones();
             emitTryCatch(cur.tries);
             emitLineNumbers(cur.labels);
             cur.writer.setFrameProvider(cur);
@@ -2497,10 +2600,18 @@ public final class Translator {
 
         void emitConst(TypeInference.Insn insn, TypeInference.InsnTypes it, boolean wide) {
             long v = insn.args[1];
+            // Readings ConstReadingElision proved overwritten before anything
+            // can observe them; only ever non-zero on a rescue retry.
+            int dead = deadConstReadings == null ? 0
+                    : deadConstReadings.getOrDefault(insn.offset, 0);
             for (TypeInference.Def d : it.defs) {
                 for (int scalar : DexType.scalarBits(d.scalars)) {
                     int slot = locals.slotOrMinusOne(d.register, scalar);
                     if (slot < 0) continue;
+                    if ((dead & scalar) != 0 && d.register == insn.arg(0)) {
+                        ConstReadingElision.elided.incrementAndGet();
+                        continue;
+                    }
                     pushConst(scalar, v, wide);
                     out.varOp(storeOp(scalar), slot);
                 }
@@ -3473,7 +3584,8 @@ public final class Translator {
                     // same range already covers everything it could catch, and
                     // the JVM tries handlers in table order anyway.
                     if (!types.isReachable(c.handlerOffset)) continue;
-                    CodeWriter.Label h = cur.handlerStubs.get(c.handlerOffset);
+                    CodeWriter.Label h = cur.cloneLabels.get(c.handlerOffset);
+                    if (h == null) h = cur.handlerStubs.get(c.handlerOffset);
                     if (h == null) h = cur.labels.get(c.handlerOffset);
                     if (h == null) {
                         // On the ordinary path a reachable handler always has a
