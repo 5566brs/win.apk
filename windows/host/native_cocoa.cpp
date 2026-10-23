@@ -42,7 +42,10 @@ namespace winapk::host {
 
 namespace {
 
-// Upstream's default phone size (cocoa_bridge.mm), in points.
+// The phone the app is shown, in dp. Upstream's cocoa_bridge.mm starts from
+// 360x640, a 16:9 phone; choose_phone_size() makes it 360x800 (9:20, the most
+// common phone screen today and about the shape upstream's Mac launcher picks)
+// when the screen has room.
 std::atomic<int> g_phone_w{360};
 std::atomic<int> g_phone_h{640};
 std::atomic<jlong> g_next_handle{1};
@@ -153,6 +156,35 @@ bool headless_requested() {
     return e && *e && *e != '0';
 }
 
+// WINAPK_PHONE_SIZE=<width>x<height>, in dp, sets the phone outright.
+// Malformed or out-of-range values are ignored.
+bool apply_phone_size_override() {
+    const char* e = std::getenv("WINAPK_PHONE_SIZE");
+    if (!e || !*e) return false;
+    int w = 0, h = 0;
+    char x = 0;
+    if (std::sscanf(e, "%d%c%d", &w, &x, &h) != 3 || (x != 'x' && x != 'X')) return false;
+    if (w < 200 || h < 200 || w > 4000 || h > 4000) return false;
+    g_phone_w = w;
+    g_phone_h = h;
+    return true;
+}
+
+// 360x800 unless the window would not fit the work area, then as tall as fits,
+// but not shorter than upstream's 640. Apps lay out for today's tall phones:
+// at 640 WhatsApp's welcome screen centres its content up under the top bar,
+// and the content then takes the taps meant for the bar's overflow button.
+void choose_phone_size() {
+    if (apply_phone_size_override()) return;
+    constexpr int kTall = 800, kShort = 640;
+    int h = kTall;
+    if (!headless_requested()) {
+        const int fit = window_max_phone_height();
+        if (fit > 0 && fit < h) h = fit > kShort ? fit : kShort;
+    }
+    g_phone_h = h;
+}
+
 // ---- the app icon -----------------------------------------------------------
 //
 // Boot renders the app's launcher icon, adaptive and vector ones included, to
@@ -176,6 +208,7 @@ void apply_app_icon() {
 
 jboolean JNICALL Cocoa_init(JNIEnv* env, jclass) {
     env->GetJavaVM(&g_vm);
+    choose_phone_size();
     if (headless_requested()) {
         std::fprintf(stderr, "[win.apk] WINAPK_HEADLESS is set; running without a window\n");
     } else if (!window_start(g_phone_w, g_phone_h, &g_java_input)) {
