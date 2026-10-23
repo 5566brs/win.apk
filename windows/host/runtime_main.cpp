@@ -404,7 +404,33 @@ DWORD WINAPI boot_thread(void* param) {
 
 }  // namespace
 
+// stderr is unbuffered in the UCRT, and an unbuffered fprintf hands the
+// stream ONE CHARACTER per WriteFile: measured 564 us per 150-byte log line
+// against 9 us for the same line through a buffer, all of it under the stream
+// lock. Every log line of every thread queued behind that lock, and lines from
+// different threads interleaved character by character. A JFR of WhatsApp's
+// boot had its main thread in NativeLog.print for most of the samples it was
+// not idle in: the first frame took 48 to 76 s, and about 5 s with this.
+//
+// So stderr gets a 64 KB buffer, flushed every 200 ms by a background thread,
+// at once for warnings and errors (NativeLog), and on the exit paths that
+// already flush. A hard crash can lose at most the last 200 ms of INFO lines.
+DWORD WINAPI stderr_flusher(void*) {
+    for (;;) {
+        Sleep(200);
+        std::fflush(stderr);
+    }
+}
+
+void buffer_stderr() {
+    static char buf[1 << 16];
+    std::setvbuf(stderr, buf, _IOFBF, sizeof buf);
+    HANDLE t = CreateThread(nullptr, 64 * 1024, stderr_flusher, nullptr, STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
+    if (t) CloseHandle(t);
+}
+
 int wmain(int argc, wchar_t** argv) {
+    buffer_stderr();
     BootArgs b;
     if (!parse_args(argc, argv, &b.options)) {
         std::fprintf(stderr, "usage: winapk-runtime --apk <file.apk|.apkm|.xapk|.apks> [--data <dir>] [--jdk <dir>] [--lib <dir>] "
