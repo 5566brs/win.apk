@@ -27,6 +27,9 @@ public:
     virtual void key(int action, int key_code, int unicode, int meta) = 0;
     // The user closed the window.
     virtual void close_requested() = 0;
+    // The window came back from being minimized (taskbar, Alt+Tab): upstream's
+    // unhide observer, which brings back a task the app sent to the back.
+    virtual void restored() {}
 };
 
 // Creates the window (hidden) for a phone of phone_w by phone_h points.

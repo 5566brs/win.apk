@@ -98,6 +98,40 @@ public:
         std::fflush(stderr);
         TerminateProcess(GetCurrentProcess(), 0);
     }
+    // ActivityHost.macapkTaskToFront: a no-op unless the app sent its task to
+    // the back. Resolved through the dispatcher's class loader, which is the
+    // one that loaded the runtime's classes.
+    void restored() override {
+        JNIEnv* env = ui_thread_env();
+        if (!env || !g_dispatcher) return;
+        static jclass host = nullptr;
+        static jmethodID to_front = nullptr;
+        if (!host) {
+            jclass dcls = env->GetObjectClass(g_dispatcher);
+            jclass ccls = env->FindClass("java/lang/Class");
+            jmethodID get_loader = env->GetMethodID(ccls, "getClassLoader", "()Ljava/lang/ClassLoader;");
+            jobject loader = env->CallObjectMethod(dcls, get_loader);
+            jclass lcls = env->FindClass("java/lang/ClassLoader");
+            jmethodID load = env->GetMethodID(lcls, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
+            jstring name = env->NewStringUTF("com.macapk.loader.ActivityHost");
+            jobject cls = loader ? env->CallObjectMethod(loader, load, name) : nullptr;
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                cls = nullptr;
+            }
+            if (cls) {
+                host = static_cast<jclass>(env->NewGlobalRef(cls));
+                to_front = env->GetStaticMethodID(host, "macapkTaskToFront", "()V");
+                if (env->ExceptionCheck()) {
+                    env->ExceptionClear();
+                    to_front = nullptr;
+                }
+            }
+        }
+        if (!host || !to_front) return;
+        env->CallStaticVoidMethod(host, to_front);
+        report_input_exception(env);
+    }
 };
 
 JavaInput g_java_input;

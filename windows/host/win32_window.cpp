@@ -271,6 +271,19 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_CLOSE:
             g_input->close_requested();
             return 0;
+        case WM_SIZE: {
+            // BACK at the task root minimizes the window (moveTaskToBack) and
+            // stops the top activity; un-minimizing must resume it, or every
+            // touch after that goes to no activity at all.
+            static bool minimized = false;
+            if (wp == SIZE_MINIMIZED) {
+                minimized = true;
+            } else if (minimized && (wp == SIZE_RESTORED || wp == SIZE_MAXIMIZED)) {
+                minimized = false;
+                g_input->restored();
+            }
+            break;
+        }
         default:
             break;
     }
