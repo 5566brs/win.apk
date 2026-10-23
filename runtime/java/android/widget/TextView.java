@@ -4870,11 +4870,12 @@ public class TextView extends View
      *    applySingleLine(singleLine, !isPassword, ...) (TextView.java:6912),
      *    which lands on setTransformationMethod(SingleLineTransformationMethod
      *    .getInstance()) or setTransformationMethod(null) depending on the
-     *    multi-line flag. Our setSingleLine() never installs
-     *    SingleLineTransformationMethod at all, so mirroring the single-line
-     *    half here would newline-collapse every single-line TextView in the
-     *    fleet -- a much wider change than this lane. We clear to null, which
-     *    is AOSP's own multi-line answer and matches the rest of this tree.
+     *    multi-line flag. Only the setSingleLine() API installs
+     *    SingleLineTransformationMethod here (MACAPK_SINGLELINE_TRANSFORM),
+     *    so mirroring the single-line half here would newline-collapse every
+     *    field whose inputType merely lacks textMultiLine -- a much wider
+     *    change than this lane. We clear to null, which is AOSP's own
+     *    multi-line answer and matches the rest of this tree.
      *  - No setTypefaceFromAttrs(MONOSPACE): AOSP switches password fields to
      *    a monospace face so the dots align. Cosmetic, and our Paint has no
      *    typeface-by-index selection. */
@@ -4893,8 +4894,8 @@ public class TextView extends View
         // Only the FLAG is applied here. The rest of applySingleLine (setLines(1),
         // setHorizontallyScrolling, SingleLineTransformationMethod, the
         // MAX_LENGTH_FOR_SINGLE_LINE_EDIT_TEXT filter) stays out for the reason
-        // already recorded above this method: this tree has no
-        // SingleLineTransformationMethod wiring, and installing the layout half
+        // already recorded above this method: only setSingleLine() installs
+        // SingleLineTransformationMethod, and installing the layout half
         // here would newline-collapse fields fleet-wide. The flag on its own is
         // what isSingleLine() -- and therefore macapkActionIdForEnterEvent() --
         // needs to answer correctly, and it is also the value AOSP's
@@ -5000,7 +5001,48 @@ public class TextView extends View
         if (s) maxLines = 1;
         if (s) { macapkSetMin(1, true); macapkSetMax(1, true); }
         else   { macapkSetMax(Integer.MAX_VALUE, true); }
+        // AOSP setSingleLine -> applySingleLine(singleLine, true, true, true)
+        // (android14 TextView.java:11915-11940):
+        //     if (singleLine) { setLines(1); setHorizontallyScrolling(true);
+        //         setTransformationMethod(SingleLineTransformationMethod.getInstance()); }
+        //     else { ...; setTransformationMethod(null); }
+        // Without the transformation a single-line view kept its '\n': it
+        // MEASURED only the first paragraph while the one-line draw path ran
+        // the whole text on, so it ellipsized almost at once. MEASURED:
+        // NoNonsense Notes' search result row (title + "\n" + body, wrap_content,
+        // setSingleLine(true) when "rows" = 1) measured 99 px and showed
+        // "Shopping li ...". Scoped: the API call only (setInputType still sets
+        // the flag alone, see setInputType), and an app transformation such as
+        // a password mask is left in place. MACAPK_SINGLELINE_TRANSFORM=0
+        // restores the old behaviour.
+        if (MACAPK_SINGLELINE_TRANSFORM) {
+            final android.text.method.TransformationMethod sl =
+                android.text.method.SingleLineTransformationMethod.getInstance();
+            if (s) {
+                // Replace whatever is installed, as AOSP does -- AppCompat's
+                // setTransformationMethod override re-wraps it in emoji2's
+                // EmojiTransformationMethod, which every AppCompatTextView
+                // already carries -- except a password mask: our inflater
+                // applies XML singleLine AFTER the constructor chain, where
+                // AOSP's applySingleLine runs before setInputType installs it.
+                if (!(mTransformationMethod instanceof android.text.method.PasswordTransformationMethod)) {
+                    setTransformationMethod(sl);
+                    mMacapkSingleLineTransform = true;
+                }
+            } else if (mMacapkSingleLineTransform) {
+                // AOSP's applySingleLine(false, ...) clears the transformation.
+                // Only undo one this method installed, so a field that was
+                // never set single-line here keeps its own.
+                mMacapkSingleLineTransform = false;
+                setTransformationMethod(null);
+            }
+        }
     }
+    static final boolean MACAPK_SINGLELINE_TRANSFORM =
+        !"0".equals(System.getenv("MACAPK_SINGLELINE_TRANSFORM"));
+    /** setSingleLine(true) installed SingleLineTransformationMethod (possibly
+     *  re-wrapped by an AppCompat subclass, so not comparable by identity). */
+    private boolean mMacapkSingleLineTransform;
     public void setSingleLine() { setSingleLine(true); }
 
     /** AOSP TextView.isSingleLine() (android14-release TextView.java:7405-7408),
