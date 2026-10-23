@@ -1972,6 +1972,8 @@ public class LayoutInflater {
      *  AOSP rule index constants (RelativeLayout.ALIGN_PARENT_BOTTOM
      *  etc.) are stable; using them keeps the rule mapping uniform
      *  with whatever addRule() the app code might call directly. */
+    static final boolean MACAPK_RL_RELATIVE_VERBS =
+        !"0".equals(System.getenv("MACAPK_RL_RELATIVE_VERBS"));
     private void applyRelativeLayoutAttribute(android.widget.RelativeLayout.LayoutParams rlp,
                                                 String attr, String value) {
         // Diagnostic: confirm we're seeing layout_* attrs.
@@ -1989,13 +1991,31 @@ public class LayoutInflater {
             case "layout_alignParentBottom":
                 if (isTrue) rlp.addRule(android.widget.RelativeLayout.ALIGN_PARENT_BOTTOM);
                 return;
+            // AOSP RelativeLayout.LayoutParams(Context, AttributeSet) keeps the
+            // RELATIVE verbs as written (rules[ALIGN_PARENT_START] etc.) and
+            // resolveRules maps them by layout direction at measure time (our
+            // RelativeLayout.LayoutParams.resolveLayoutDirection does too). This
+            // inflater folded every Start/End attribute into its Left/Right verb
+            // up front, so under an RTL locale alignParentStart, toStartOf and
+            // alignStart all landed on the LEFT: androidx Preference rows kept
+            // their summary pinned to the title's left edge (Privacy Friendly
+            // Notes' Settings, Hebrew). MACAPK_RL_RELATIVE_VERBS=0 restores the
+            // fold.
             case "layout_alignParentLeft":
-            case "layout_alignParentStart":
                 if (isTrue) rlp.addRule(android.widget.RelativeLayout.ALIGN_PARENT_LEFT);
                 return;
+            case "layout_alignParentStart":
+                if (isTrue) rlp.addRule(MACAPK_RL_RELATIVE_VERBS
+                        ? android.widget.RelativeLayout.ALIGN_PARENT_START
+                        : android.widget.RelativeLayout.ALIGN_PARENT_LEFT);
+                return;
             case "layout_alignParentRight":
-            case "layout_alignParentEnd":
                 if (isTrue) rlp.addRule(android.widget.RelativeLayout.ALIGN_PARENT_RIGHT);
+                return;
+            case "layout_alignParentEnd":
+                if (isTrue) rlp.addRule(MACAPK_RL_RELATIVE_VERBS
+                        ? android.widget.RelativeLayout.ALIGN_PARENT_END
+                        : android.widget.RelativeLayout.ALIGN_PARENT_RIGHT);
                 return;
             case "layout_centerInParent":
                 if (isTrue) rlp.addRule(android.widget.RelativeLayout.CENTER_IN_PARENT);
@@ -2016,21 +2036,29 @@ public class LayoutInflater {
             case "layout_below":
                 rlp.addRule(android.widget.RelativeLayout.BELOW, subject); return;
             case "layout_toLeftOf":
-            case "layout_toStartOf":
                 rlp.addRule(android.widget.RelativeLayout.LEFT_OF, subject); return;
+            case "layout_toStartOf":
+                rlp.addRule(MACAPK_RL_RELATIVE_VERBS ? android.widget.RelativeLayout.START_OF
+                        : android.widget.RelativeLayout.LEFT_OF, subject); return;
             case "layout_toRightOf":
-            case "layout_toEndOf":
                 rlp.addRule(android.widget.RelativeLayout.RIGHT_OF, subject); return;
+            case "layout_toEndOf":
+                rlp.addRule(MACAPK_RL_RELATIVE_VERBS ? android.widget.RelativeLayout.END_OF
+                        : android.widget.RelativeLayout.RIGHT_OF, subject); return;
             case "layout_alignTop":
                 rlp.addRule(android.widget.RelativeLayout.ALIGN_TOP, subject); return;
             case "layout_alignBottom":
                 rlp.addRule(android.widget.RelativeLayout.ALIGN_BOTTOM, subject); return;
             case "layout_alignLeft":
-            case "layout_alignStart":
                 rlp.addRule(android.widget.RelativeLayout.ALIGN_LEFT, subject); return;
+            case "layout_alignStart":
+                rlp.addRule(MACAPK_RL_RELATIVE_VERBS ? android.widget.RelativeLayout.ALIGN_START
+                        : android.widget.RelativeLayout.ALIGN_LEFT, subject); return;
             case "layout_alignRight":
-            case "layout_alignEnd":
                 rlp.addRule(android.widget.RelativeLayout.ALIGN_RIGHT, subject); return;
+            case "layout_alignEnd":
+                rlp.addRule(MACAPK_RL_RELATIVE_VERBS ? android.widget.RelativeLayout.ALIGN_END
+                        : android.widget.RelativeLayout.ALIGN_RIGHT, subject); return;
             case "layout_alignBaseline":
                 rlp.addRule(android.widget.RelativeLayout.ALIGN_BASELINE, subject); return;
         }

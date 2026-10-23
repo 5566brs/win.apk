@@ -557,6 +557,24 @@ public class RelativeLayout extends ViewGroup {
         final boolean macapkMarginsCountTowardWrapContent = !macapkPreKitKatWrapContent;
         if (widthMode == android.view.View.MeasureSpec.EXACTLY) {
             width = widthSize;
+        } else if (macapkRtlDefault() && myWidth > 0) {
+            // AOSP onMeasure under RTL measures a wrap_content width from the
+            // RIGHT edge the children were positioned against (positionAtEdge):
+            //     width = Math.max(width, myWidth - params.mLeft + params.leftMargin);
+            //     ... width += mPaddingRight;
+            // then shifts every child left by myWidth - width.
+            int maxExtent = padLeft;
+            for (int i = 0; i < count; i++) {
+                View child = getChildAt(i);
+                if (child == null || child.getVisibility() == View.GONE) continue;
+                int lm = (macapkMarginsCountTowardWrapContent
+                        && child.getLayoutParams() instanceof LayoutParams lp)
+                        ? lp.leftMargin : 0;
+                maxExtent = Math.max(maxExtent, myWidth - ml[i] + lm);
+            }
+            width = maxExtent + padRight;
+            width = Math.max(width, getSuggestedMinimumWidth());
+            if (widthMode == android.view.View.MeasureSpec.AT_MOST) width = Math.min(width, widthSize);
         } else {
             int maxRight = padLeft;
             for (int i = 0; i < count; i++) {
@@ -730,6 +748,27 @@ public class RelativeLayout extends ViewGroup {
      *  non-filling child is laid out at the parent's top-left at its measured
      *  size, as AOSP does, instead of being deferred to the equal-vertical-stack
      *  fallback. =0 restores the deferral exactly. */
+    /** AOSP positionChildHorizontal, the default case (both edges unset, no
+     *  CENTER_* rule; android14 RelativeLayout.java:~1095):
+     *      // This is the default case. For RTL we start from the right and for
+     *      // LTR we start from the left. This will give LEFT/TOP for LTR and
+     *      // RIGHT/TOP for RTL.
+     *      if (isLayoutRtl()) {
+     *          params.mRight = myWidth - mPaddingRight - params.rightMargin;
+     *          params.mLeft = params.mRight - child.getMeasuredWidth();
+     *      } else { params.mLeft = mPaddingLeft + params.leftMargin; ... }
+     *  Ours always started from the left, so under an RTL locale every
+     *  rule-less wrap_content child sat on the wrong side: androidx
+     *  Preference titles stayed at the left while their summaries (aligned to
+     *  the title's START edge) went right (Privacy Friendly Notes' Settings,
+     *  Hebrew locale). LTR is unchanged. MACAPK_RL_RTL_DEFAULT=0 restores the left start. */
+    private static final boolean MACAPK_RL_RTL_DEFAULT =
+        !"0".equals(System.getenv("MACAPK_RL_RTL_DEFAULT"));
+    private boolean macapkRtlDefault() {
+        if (!MACAPK_RL_RTL_DEFAULT) return false;
+        try { return isLayoutRtl(); } catch (Throwable t) { return false; }
+    }
+
     private static final boolean NORULE_TOPLEFT =
         !"0".equals(System.getenv("MACAPK_RL_NORULE_TOPLEFT"));
 
@@ -939,9 +978,16 @@ public class RelativeLayout extends ViewGroup {
                 // empty wrap_content child would then displace every sibling that
                 // anchors to it.
                 if (leftPos == Integer.MIN_VALUE && rightPos == Integer.MIN_VALUE) {
+                    if (macapkRtlDefault() && !wMatch && parentW > 0) {
+                        // AOSP positionChildHorizontal default case under RTL
+                        // (see macapkRtlDefault): start from the right.
+                        rightPos = parentW - padRight - margR;
+                        leftPos = rightPos - childW;
+                    } else {
                     leftPos = padLeft + margL;
                     rightPos = (wMatch && parentW > 0) ? parentW - padRight - margR
                              : leftPos + childW;
+                    }
                 } else if (leftPos == Integer.MIN_VALUE) {
                     leftPos = rightPos - childW;
                 } else if (rightPos == Integer.MIN_VALUE) {
@@ -1159,6 +1205,9 @@ public class RelativeLayout extends ViewGroup {
                         // it never starts"). MACAPK_RL_NORULE_TOPLEFT=0 restores
                         // the deferral exactly.
                         int lpos = padLeft + margL;
+                        if (macapkRtlDefault()) {
+                            lpos = parentW - padRight - margR - Math.max(0, child.getMeasuredWidth());
+                        }
                         int tpos = padTop  + margT;
                         child.layout(lpos, tpos,
                                      lpos + Math.max(0, child.getMeasuredWidth()),
@@ -1308,7 +1357,11 @@ public class RelativeLayout extends ViewGroup {
                 final boolean widthMatchParent  = (lp != null && lp.width  == ViewGroup.LayoutParams.MATCH_PARENT);
                 final boolean heightMatchParent = (lp != null && lp.height == ViewGroup.LayoutParams.MATCH_PARENT);
 
-                if (leftPos == Integer.MIN_VALUE && rightPos == Integer.MIN_VALUE) {
+                if (leftPos == Integer.MIN_VALUE && rightPos == Integer.MIN_VALUE
+                        && macapkRtlDefault() && !widthMatchParent && childW > 0) {
+                    rightPos = parentW - padRight - margR;
+                    leftPos = rightPos - childW;
+                } else if (leftPos == Integer.MIN_VALUE && rightPos == Integer.MIN_VALUE) {
                     leftPos = padLeft + margL;
                     if (widthMatchParent) {
                         rightPos = parentW - padRight - margR;
