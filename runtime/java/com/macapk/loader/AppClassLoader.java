@@ -1552,6 +1552,8 @@ public final class AppClassLoader extends dalvik.system.PathClassLoader {
         for (File root : soLoaderRoots()) {
             prepared += exposeDylibsForSoLoader(new File(root, "lib-compressed"), soDir, exposed);
             prepared += exposeDylibsForSoLoader(new File(root, "lib-main"), soDir, exposed);
+            for (File d : macapkDecompressedSoDirs(root))
+                prepared += exposeDylibsForSoLoader(d, soDir, exposed);
         }
         NativeLog.i(TAG, "prepareDirectDlopenLibs: SoLoader app -- exposed "
                 + prepared + " dylib(s) in " + soDir.getName()
@@ -1571,8 +1573,20 @@ public final class AppClassLoader extends dalvik.system.PathClassLoader {
         // linker never does for a DT_NEEDED dependency. See linkDependencyOnly.
         // (Only for deps that sit in soDir, where Android's linker maps them
         // implicitly; deps from SoLoader's unpacking roots keep System.load.)
-        premapDependencyLibs(exposed, soDir);
+        if (!HOST_LINKS_GUEST_DEPS) premapDependencyLibs(exposed, soDir);
     }
+
+    /** True on the Windows host, whose stubs are DLLs that hand the ELF to the
+     *  host's guest linker, and that linker maps the ELF's DT_NEEDED closure
+     *  itself. The premap below exists for the macOS translator's Mach-O, whose
+     *  cross-library edges it cannot always emit, so Windows does not need it --
+     *  and it hurts there: it System.load()s unpacking-root dependencies from the
+     *  Boot thread before the app has initialised its own native loader. WhatsApp's
+     *  libfbjni then ran JNI_OnLoad early, ThreadScopeSupport's static init threw
+     *  ("NativeLoader has not been initialized"), and the process died. The JVM's
+     *  own library naming tells the hosts apart; os.name reads Linux for the guest. */
+    private static final boolean HOST_LINKS_GUEST_DEPS =
+            System.mapLibraryName("x").endsWith(".dll");
 
     /**
      * SECOND-PHASE SoLoader exposure: run AFTER the app's attachBaseContext, i.e.
@@ -1619,6 +1633,18 @@ public final class AppClassLoader extends dalvik.system.PathClassLoader {
     /** Where SoLoader's unpack dirs can be: the data dir first (where
      *  ApplicationInfo.dataDir points now), then appDir (pre-v1.0.1641 unpacks,
      *  until Boot's code-dir migration has moved them). */
+    /** The other place a superpack ends up: an app that runs the decompressor
+     *  itself rather than through SoLoader's unpacking sources (WhatsApp) unpacks
+     *  each archive into files/decompressed/<archive>, and registers that dir as
+     *  a SoSource that ELF-validates its contents the way lib-compressed does. So
+     *  it gets the same treatment: translate what is there, expose in soDir. */
+    private java.util.List<File> macapkDecompressedSoDirs(File root) {
+        java.util.List<File> out = new java.util.ArrayList<>();
+        File[] archives = new File(root, "files/decompressed").listFiles(File::isDirectory);
+        if (archives != null) for (File a : archives) out.add(a);
+        return out;
+    }
+
     private java.util.List<File> soLoaderRoots() {
         java.util.List<File> roots = new java.util.ArrayList<>(2);
         File d = macapkDataDir;
@@ -1639,10 +1665,12 @@ public final class AppClassLoader extends dalvik.system.PathClassLoader {
         for (File root : soLoaderRoots()) {
             File libCompressed = new File(root, "lib-compressed");
             File libMain       = new File(root, "lib-main");
-            if (!libCompressed.isDirectory() && !libMain.isDirectory()) continue;
+            java.util.List<File> decompressed = macapkDecompressedSoDirs(root);
+            if (!libCompressed.isDirectory() && !libMain.isDirectory() && decompressed.isEmpty()) continue;
             any = true;
             prepared += exposeDylibsForSoLoader(libCompressed, soDir, exposed);
             prepared += exposeDylibsForSoLoader(libMain, soDir, exposed);
+            for (File d : decompressed) prepared += exposeDylibsForSoLoader(d, soDir, exposed);
         }
         if (!any) return;
         if (prepared == 0) return;   // nothing extracted yet (or not a superpack app)
@@ -1654,7 +1682,7 @@ public final class AppClassLoader extends dalvik.system.PathClassLoader {
         // exposed map). Only superpack->superpack DT_NEEDED edges are mapped now.
         // Every one of these sits in an UNPACKING root (lib-compressed/lib-main),
         // so all of them keep System.load (see premapOne's scope check).
-        premapDependencyLibs(exposed, soDir);
+        if (!HOST_LINKS_GUEST_DEPS) premapDependencyLibs(exposed, soDir);
     }
 
     /** Map every lib that is DT_NEEDED by another exposed lib (its dependencies),
@@ -1838,7 +1866,9 @@ public final class AppClassLoader extends dalvik.system.PathClassLoader {
         for (File so : sos) {
             String fileBase = so.getName().substring(0, so.getName().length() - 3); // "libX"
             String libname  = fileBase.substring(3);                                // "X"
-            File dylibInDir = new File(exposeDir, fileBase + ".dylib");
+            // The name SoLoader looks for is System.mapLibraryName("X"): libX.dylib
+            // on macOS, X.dll on Windows. The cache keeps its own naming.
+            File dylibInDir = new File(exposeDir, System.mapLibraryName(libname));
             File cached     = new File(cacheDir, fileBase + ".dylib");
             try {
                 // v1.0.1641: also keyed on the SOURCE .so (size + mtime). SoLoader
@@ -1863,7 +1893,22 @@ public final class AppClassLoader extends dalvik.system.PathClassLoader {
                 // same file (one image, no double JNI_OnLoad).
                 java.nio.file.Path link = dylibInDir.toPath();
                 java.nio.file.Files.deleteIfExists(link);   // never follows a symlink
-                java.nio.file.Files.createSymbolicLink(link, cached.toPath());
+                try {
+                    java.nio.file.Files.createSymbolicLink(link, cached.toPath());
+                } catch (java.io.IOException | UnsupportedOperationException e) {
+                    // Windows grants symbolic links only with Developer Mode or
+                    // elevation. A copy serves SoLoader the same: the cached file
+                    // is a small stub that loads the ELF its ".source" sidecar
+                    // names, so the sidecar travels with it.
+                    java.nio.file.Files.copy(cached.toPath(), link,
+                            java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    File side = new File(cached.getPath() + ".source");
+                    if (side.isFile()) {
+                        java.nio.file.Files.copy(side.toPath(),
+                                new File(dylibInDir.getPath() + ".source").toPath(),
+                                java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    }
+                }
                 prepared++;
                 if (exposed != null) exposed.put(so.getName(), new File[]{so, cached});
             } catch (Throwable t) {
