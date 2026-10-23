@@ -327,6 +327,59 @@ std::vector<const ElfImage*> GuestLinker::images() const {
     return out;
 }
 
+std::vector<GuestLinker::PhdrView> GuestLinker::phdr_views() const {
+    std::lock_guard<std::recursive_mutex> hold(lock_);
+    std::vector<PhdrView> out;
+    for (const auto& l : libs_) {
+        const ElfImage* img = l->image.get();
+        if (!img || img->phdrs().empty()) continue;
+        out.push_back({img->load_bias(), l->file.c_str(), img->phdrs().data(),
+                       static_cast<uint16_t>(img->phdrs().size()), img->tls_module()});
+    }
+    return out;
+}
+
+// /proc/self/maps as Linux prints it (fs/proc/task_mmu.c show_map_vma): one
+// line per PT_LOAD of every loaded guest library, page-aligned, with its
+// permissions, file offset and path, the path starting at column 73. Native
+// code that locates itself or its neighbours through this file (Facebook's
+// MobileConfig in WhatsApp opens it right after boot and threw
+// "fopen(/proc/self/maps): No such file or directory") gets the same library
+// set and the same path dladdr and dl_iterate_phdr report. Host modules and
+// anonymous memory are not listed: they are not part of the guest's address
+// space as Bionic would describe it.
+std::string GuestLinker::proc_maps() const {
+    std::lock_guard<std::recursive_mutex> hold(lock_);
+    std::string out;
+    char line[128];
+    for (const auto& l : libs_) {
+        const ElfImage* img = l->image.get();
+        if (!img) continue;
+        // A stable stand-in inode, so file-backed lines look file-backed.
+        uint32_t inode = 2166136261u;
+        for (const unsigned char c : l->file) inode = (inode ^ c) * 16777619u;
+        inode = (inode & 0x7fffffffu) | 1u;
+        const uint64_t bias = img->load_bias();
+        constexpr uint64_t kPage = 0x1000;
+        for (const elf::Phdr& ph : img->phdrs()) {
+            if (ph.p_type != elf::kPtLoad || ph.p_memsz == 0) continue;
+            const uint64_t start = (bias + ph.p_vaddr) & ~(kPage - 1);
+            const uint64_t end = (bias + ph.p_vaddr + ph.p_memsz + kPage - 1) & ~(kPage - 1);
+            const int n = std::snprintf(line, sizeof line, "%llx-%llx %c%c%cp %08llx fd:01 %u",
+                                        static_cast<unsigned long long>(start), static_cast<unsigned long long>(end),
+                                        (ph.p_flags & 4) ? 'r' : '-', (ph.p_flags & 2) ? 'w' : '-',
+                                        (ph.p_flags & 1) ? 'x' : '-',
+                                        static_cast<unsigned long long>(ph.p_offset & ~(kPage - 1)), inode);
+            if (n <= 0) continue;
+            out.append(line, static_cast<size_t>(n));
+            out.append(n < 73 ? static_cast<size_t>(73 - n) : 1, ' ');
+            out += l->file;
+            out += '\n';
+        }
+    }
+    return out;
+}
+
 bool GuestLinker::describe(const void* addr, AddrInfo* info) const {
     std::lock_guard<std::recursive_mutex> hold(lock_);
     for (const auto& l : libs_) {
@@ -444,6 +497,41 @@ WINAPK_GUEST_ABI int g_dladdr(const void* addr, GuestDlInfo* info) {
     return 1;
 }
 
+// Bionic's struct dl_phdr_info (LP64, API 30+ layout); the size argument
+// tells the callback which fields are there.
+struct GuestDlPhdrInfo {
+    uint64_t dlpi_addr;
+    const char* dlpi_name;
+    const void* dlpi_phdr;
+    uint16_t dlpi_phnum;
+    unsigned long long dlpi_adds;
+    unsigned long long dlpi_subs;
+    size_t dlpi_tls_modid;
+    void* dlpi_tls_data;
+};
+using DlIterateCallback = int(WINAPK_GUEST_ABI*)(GuestDlPhdrInfo*, size_t, void*);
+
+// libunwind finds a frame's .eh_frame_hdr through dl_iterate_phdr, so
+// without it every C++ throw in guest code ends in std::terminate.
+WINAPK_GUEST_ABI int g_dl_iterate_phdr(DlIterateCallback cb, void* data) {
+    GuestLinker* linker = GuestLinker::process();
+    if (!linker || !cb) return 0;
+    const std::vector<GuestLinker::PhdrView> views = linker->phdr_views();
+    for (const GuestLinker::PhdrView& v : views) {
+        GuestDlPhdrInfo info{};
+        info.dlpi_addr = v.bias;
+        info.dlpi_name = v.file;
+        info.dlpi_phdr = v.phdr;
+        info.dlpi_phnum = v.phnum;
+        info.dlpi_adds = views.size();
+        info.dlpi_subs = 0;
+        info.dlpi_tls_modid = v.tls_module;
+        info.dlpi_tls_data = nullptr;
+        if (int r = cb(&info, sizeof(info), data)) return r;
+    }
+    return 0;
+}
+
 struct LibdlSymbol {
     const char* name;
     void* addr;
@@ -458,6 +546,7 @@ const LibdlSymbol kLibdl[] = {
     WINAPK_LIBDL("dlclose", g_dlclose),
     WINAPK_LIBDL("dlerror", g_dlerror),
     WINAPK_LIBDL("dladdr", g_dladdr),
+    WINAPK_LIBDL("dl_iterate_phdr", g_dl_iterate_phdr),
 };
 
 #undef WINAPK_LIBDL

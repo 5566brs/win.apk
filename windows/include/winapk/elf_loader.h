@@ -31,6 +31,9 @@
 #include <unordered_map>
 #include <vector>
 
+#include "winapk/elf64_defs.h"
+#include <vector>
+
 namespace winapk {
 
 // Returns the host address for an undefined guest symbol, or nullptr.
@@ -117,6 +120,8 @@ public:
     const std::string& soname() const { return soname_; }
     const std::vector<std::string>& needed() const { return needed_; }
     uintptr_t load_bias() const { return bias_; }
+    // The program header table, as dl_iterate_phdr reports it.
+    const std::vector<elf::Phdr>& phdrs() const { return phdrs_; }
     size_t mapped_size() const { return size_; }
     size_t fs_sites_patched() const { return fs_sites_patched_; }
     size_t relocations_applied() const { return relocs_applied_; }
@@ -148,6 +153,7 @@ private:
 
     struct Segment { uint64_t vaddr, memsz, filesz, offset; uint32_t flags; };
     std::vector<Segment> loads_;
+    std::vector<elf::Phdr> phdrs_;
     bool has_relro_ = false;
     uint64_t relro_vaddr_ = 0, relro_memsz_ = 0;
     uint64_t dynamic_vaddr_ = 0;
