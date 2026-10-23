@@ -1860,7 +1860,13 @@ public class Resources {
         catch (NumberFormatException nfe) { return null; }
         if (id == 0) return null;
         String[] tn = macapkTypeNameOf(id);
-        if (tn == null || tn.length < 2 || !"attr".equals(tn[0])
+        // "^attr-private" is a PRIVATE platform attribute (0x0112....): the
+        // platform themes bind it by name like any public one (ResourceIndex
+        // .macapkStyleItemKey), e.g. popup_background_material's
+        // ?attr/colorPopupBackground.
+        if (tn == null || tn.length < 2
+                || !("attr".equals(tn[0])
+                     || ((id >>> 24) == 0x01 && "^attr-private".equals(tn[0])))
                 || tn[1] == null || tn[1].isEmpty()) return null;
         return ((id >>> 24) == 0x01 ? "?android:" : "?") + tn[1];
     }
