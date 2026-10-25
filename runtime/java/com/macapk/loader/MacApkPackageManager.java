@@ -2782,11 +2782,16 @@ public final class MacApkPackageManager extends PackageManager {
         // The host rows are appended AFTER the app rows even though
         // MACAPK_PM_RESOLVE_ORDER sorts those: on a device they would take part
         // in RESOLVE_PRIORITY_SORTER, and a system browser wins a tie on
-        // `system`, but whether the app's own row would tie depends on the
-        // `<data android:host>` match category, which Manifest does not parse yet
-        // (docs/pm-intent-resolution-scope-and-matchdata_2026-09-26.md
-        // section 3). Sorting them in before that lands would hand resolveActivity
-        // to the browser for every app with an https deep link. Tracked in
+        // `system`. With the `<data>` authority modelled
+        // (MACAPK_INTENT_DATA_MATCH, macapkFrameworkFilter) an app's deep-link
+        // row for a web URI matched one of its declared hosts, i.e. with
+        // MATCH_CATEGORY_HOST or better, which outranks a browser's scheme-only
+        // MATCH_CATEGORY_SCHEME, so for those "app rows first" is also the
+        // sorter's order (only an app whose http filter names no host -- a
+        // browser itself -- would tie). And a URI on no declared host -- androidx.browser's
+        // and AppAuth's host-less "which apps are browsers?" probe included --
+        // lists the browser row alone, so an app with https deep links no
+        // longer looks like a browser to itself. Tracked in
         // docs/pm-service-selector-and-resolver-order_2026-09-26.md.
         //
         // ⚠ The host rows are OTHER PACKAGES (com.macapk.host,
@@ -3248,16 +3253,21 @@ public final class MacApkPackageManager extends PackageManager {
      *  install failure, so no such filter exists on a device. Treating it as
      *  "matches nothing" is the conservative reading; dropping only the bad
      *  type would widen the filter into an untyped one, the opposite error.
+     *  The same holds for a port that is not a number (AuthorityEntry's
+     *  Integer.parseInt throws) and a pathAdvancedPattern / sspAdvancedPattern
+     *  that PatternMatcher rejects (IllegalArgumentException).
      *
-     *  ⚠ NOT YET MODELLED: <data> host / port / path* / ssp*. Manifest's
-     *  IntentFilterEntry does not parse them, so a filter that names a scheme
-     *  still matches every authority of that scheme -- over-permissive in the
-     *  same direction as before, never newly restrictive. The IntentFilter
-     *  below already implements matchDataAuthority / hasDataPath /
-     *  hasDataSchemeSpecificPart; the follow-up is only to parse those
-     *  attributes and add them here (addDataAuthority / addDataPath /
-     *  addDataSchemeSpecificPart). Written up in
-     *  docs/pm-intent-resolution-scope-and-matchdata_2026-09-26.md. */
+     *  The `<data>` authority, path and ssp constraints (MACAPK_INTENT_DATA_MATCH,
+     *  default ON) are added exactly as ParsedIntentInfoUtils.parseData adds
+     *  them -- addDataSchemeSpecificPart, addDataAuthority(host, port),
+     *  addDataPath -- so IntentFilter.matchData applies AOSP's rules: a filter
+     *  that names hosts matches only a URI whose host is one of them ("*." a
+     *  suffix, "*" any non-null host), with the port when one is given, and
+     *  then only a path one of its path patterns accepts. A URI with no host
+     *  (Uri.fromParts("http", "", null), androidx.browser's / AppAuth's
+     *  "which apps are browsers?" probe) matches no such filter, so an app's
+     *  own https deep links no longer make it look like a browser. "0"
+     *  restores the scheme-only filter (any authority of a declared scheme). */
     private static android.content.IntentFilter macapkFrameworkFilter(Manifest.IntentFilterEntry f,
                                                                       java.util.List<String> schemes,
                                                                       java.util.List<String> types) {
@@ -3270,9 +3280,35 @@ public final class MacApkPackageManager extends PackageManager {
         } catch (android.content.IntentFilter.MalformedMimeTypeException bad) {
             return null;
         }
+        if (macapkIntentDataUriMatch()) {
+            try {
+                for (Manifest.DataPattern p : f.ssps) {
+                    real.addDataSchemeSpecificPart(macapkResolvedDataValue(p.value), p.type);
+                }
+                for (int i = 0; i < f.hosts.size(); i++) {
+                    String port = f.ports.get(i);
+                    real.addDataAuthority(macapkResolvedDataValue(f.hosts.get(i)),
+                            port != null ? macapkResolvedDataValue(port) : null);
+                }
+                for (Manifest.DataPattern p : f.paths) {
+                    real.addDataPath(macapkResolvedDataValue(p.value), p.type);
+                }
+            } catch (RuntimeException bad) {
+                return null;
+            }
+        }
         real.setPriority(f.priority);
         return real;
     }
+
+    /** MACAPK_INTENT_DATA_MATCH (default ON): manifest filters carry their
+     *  `<data>` host / port / path* / ssp* constraints into matching (see
+     *  macapkFrameworkFilter). "0" matches on scheme and type alone, as before. */
+    static boolean macapkIntentDataUriMatch() {
+        return INTENT_DATA_URI_MATCH;
+    }
+    private static final boolean INTENT_DATA_URI_MATCH =
+            !"0".equals(System.getenv("MACAPK_INTENT_DATA_MATCH"));
 
     /** MACAPK_PM_INTENT_DATA_RESREF (default ON; only consulted on the
      *  MACAPK_PM_INTENT_MATCH_DATA path, so MATCH_DATA=0 also restores the raw
