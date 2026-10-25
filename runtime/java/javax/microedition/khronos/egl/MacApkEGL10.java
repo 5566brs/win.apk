@@ -13,7 +13,9 @@
 //    already give any Java thread real ANGLE contexts and pbuffers:
 //      - eglGetDisplay answers ONE display of our own, obtained with
 //        eglGetPlatformDisplay(EGL_PLATFORM_ANGLE_ANGLE, K, {TYPE=METAL}),
-//        where K is a private native-display token. It is NEVER the
+//        where K is a private native-display token (on the Windows host:
+//        Direct3D 11 and EGL_D3D11_ONLY_DISPLAY_ANGLE; see
+//        MACAPK_EGL_WINDOWS_BACKEND at obtainWindowsDisplay). It is NEVER the
 //        framework display angle_glue.cpp renders the window with
 //        (EGL_DEFAULT_DISPLAY, TYPE=METAL), nor the plain default display
 //        the NDK EGL shim hands native engines: ANGLE-Metal keeps ONE command
@@ -302,6 +304,7 @@ public final class MacApkEGL10 implements EGL10 {
     private static final ThreadLocal<Boolean> FORK_THREAD = new ThreadLocal<>();
 
     private static RealDisplay sDisplay;   // guarded by MacApkEGL10.class
+    private static boolean sWindowsTried;  // guarded by MacApkEGL10.class
     private static final java.util.concurrent.ConcurrentHashMap<Long, RealConfig> sConfigs =
         new java.util.concurrent.ConcurrentHashMap<>();
 
@@ -346,9 +349,135 @@ public final class MacApkEGL10 implements EGL10 {
         return (realOn() && d instanceof RealDisplay) ? (RealDisplay) d : null;
     }
 
+    // ---- The Windows host (MACAPK_EGL_WINDOWS_BACKEND) ---------------------
+    //
+    // The Windows port's ANGLE (Chromium's libEGL / libGLESv2) has no Metal
+    // backend: eglGetPlatformDisplay(TYPE=METAL) answers EGL_NO_DISPLAY with
+    // EGL_BAD_ATTRIBUTE, so every thread fell to the legacy contract, whose
+    // table has no multisample row and whose eglCreateContext always refuses.
+    // Telegram's intro (IntroActivity's EGLThread: RGBA8888, depth 24,
+    // EGL_SAMPLE_BUFFERS 1 / EGL_SAMPLES 4) got 0 configs and finished, so the
+    // logo animation never drew. On Windows the display is the backend the host
+    // renders with (windows/host/gl/gl_surface.cpp: Direct3D 11, then D3D11's
+    // WARP rasterizer, then SwiftShader's Vulkan; WINAPK_ANGLE_BACKEND=d3d11 or
+    // swiftshader narrows it the same way), and its configs are ANGLE's own,
+    // multisample ones included.
+    //
+    // The native display is EGL_D3D11_ONLY_DISPLAY_ANGLE rather than the
+    // private token: ANGLE on Windows validates it (Display::isValidNativeDisplay
+    // accepts EGL_DEFAULT_DISPLAY, the three EGL_*_DISPLAY_ANGLE constants or a
+    // window's HDC, and the token is none of them), and it still keys a display
+    // apart from the host's (EGL_DEFAULT_DISPLAY), so the app's display, its
+    // initialize/terminate and its errors stay its own. "0" restores the Metal
+    // request, i.e. the legacy contract on Windows. macOS is unaffected.
+    private static final boolean WINDOWS_HOST = System.mapLibraryName("x").endsWith(".dll");
+    private static final boolean WINDOWS_BACKEND =
+        WINDOWS_HOST && !"0".equals(System.getenv("MACAPK_EGL_WINDOWS_BACKEND"));
+    private static final int EGL_PLATFORM_ANGLE_TYPE_D3D11_ANGLE = 0x3208;
+    private static final int EGL_PLATFORM_ANGLE_TYPE_VULKAN_ANGLE = 0x3450;
+    private static final int EGL_PLATFORM_ANGLE_DEVICE_TYPE_ANGLE = 0x3209;
+    private static final int EGL_PLATFORM_ANGLE_DEVICE_TYPE_D3D_WARP_ANGLE = 0x320B;
+    private static final int EGL_PLATFORM_ANGLE_DEVICE_TYPE_SWIFTSHADER_ANGLE = 0x3487;
+    /** EGL_D3D11_ONLY_DISPLAY_ANGLE ((EGLNativeDisplayType)-3, eglext_angle.h). */
+    private static final long EGL_D3D11_ONLY_DISPLAY_ANGLE = -3L;
+
+    /** The Windows display: the first backend of the host's ladder that
+     *  initializes, left initialized (the app's own eglInitialize then finds it
+     *  so, as on a device where another client of libEGL got there first), or
+     *  null when none does (the legacy contract answers, as before). */
+    private static android.opengl.EGLDisplay obtainWindowsDisplay() {
+        String want = System.getenv("WINAPK_ANGLE_BACKEND");
+        boolean sw = "swiftshader".equals(want), hw = "d3d11".equals(want);
+        java.util.List<long[]> ladder = new java.util.ArrayList<>();
+        if (!sw) {
+            ladder.add(new long[] { EGL_PLATFORM_ANGLE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_TYPE_D3D11_ANGLE,
+                    EGL_NONE });
+        }
+        if (!sw && !hw) {
+            ladder.add(new long[] { EGL_PLATFORM_ANGLE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_TYPE_D3D11_ANGLE,
+                    EGL_PLATFORM_ANGLE_DEVICE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_DEVICE_TYPE_D3D_WARP_ANGLE,
+                    EGL_NONE });
+        }
+        if (!hw) {
+            ladder.add(new long[] { EGL_PLATFORM_ANGLE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_TYPE_VULKAN_ANGLE,
+                    EGL_PLATFORM_ANGLE_DEVICE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_DEVICE_TYPE_SWIFTSHADER_ANGLE,
+                    EGL_NONE });
+        }
+        for (long[] attribs : ladder) {
+            android.opengl.EGLDisplay h = EGL15.eglGetPlatformDisplay(
+                EGL_PLATFORM_ANGLE_ANGLE, EGL_D3D11_ONLY_DISPLAY_ANGLE, attribs, 0);
+            if (h == null || h.getNativeHandle() == 0) continue;
+            if (!EGL14.eglInitialize(h, null, 0, null, 0)) {
+                EGL14.eglGetError();   // our probe's error, not the app's
+                continue;
+            }
+            try {
+                NativeLog.i(TAG, "EGL10 display: ANGLE "
+                    + (attribs[1] == EGL_PLATFORM_ANGLE_TYPE_VULKAN_ANGLE ? "SwiftShader (Vulkan)"
+                       : attribs.length > 3 ? "Direct3D 11 WARP" : "Direct3D 11")
+                    + " (Windows host)");
+            } catch (Throwable ignored) {}
+            return h;
+        }
+        return null;
+    }
+
+    /** eglChooseConfig on the Windows display, when ANGLE has no config that
+     *  meets a multisample request: the closest one it does have, the way a
+     *  driver without that sample count answers -- fewer samples first
+     *  (halving EGL_SAMPLES down to 2), then no multisample buffer at all.
+     *  Every other attribute still has to be met. null when the request asked
+     *  for no samples or nothing helps (the 0-config answer then stands). */
+    private static int[] windowsMsaaFallback(RealDisplay d, int[] attribList) {
+        if (!WINDOWS_BACKEND || attribList == null) return null;
+        int samples = 0, sampleBuffers = 0;
+        for (int i = 0; i + 1 < attribList.length && attribList[i] != EGL_NONE; i += 2) {
+            if (attribList[i] == EGL_SAMPLES) samples = attribList[i + 1];
+            if (attribList[i] == EGL_SAMPLE_BUFFERS) sampleBuffers = attribList[i + 1];
+        }
+        if (samples == EGL_DONT_CARE) samples = 0;
+        if (sampleBuffers == EGL_DONT_CARE) sampleBuffers = 0;
+        if (samples <= 0 && sampleBuffers <= 0) return null;
+        java.util.List<int[]> tries = new java.util.ArrayList<>();
+        for (int s = samples / 2; s >= 2; s /= 2) tries.add(withSamples(attribList, 1, s));
+        tries.add(withSamples(attribList, 0, 0));
+        int[] num = new int[1];
+        for (int[] t : tries) {
+            if (EGL14.eglChooseConfig(d.h, t, 0, null, 0, 0, num, 0) && num[0] > 0) return t;
+        }
+        EGL14.eglGetError();
+        return null;
+    }
+
+    /** attribList with EGL_SAMPLE_BUFFERS / EGL_SAMPLES replaced. */
+    private static int[] withSamples(int[] attribList, int sampleBuffers, int samples) {
+        java.util.List<Integer> out = new java.util.ArrayList<>();
+        for (int i = 0; i + 1 < attribList.length && attribList[i] != EGL_NONE; i += 2) {
+            if (attribList[i] == EGL_SAMPLES || attribList[i] == EGL_SAMPLE_BUFFERS) continue;
+            out.add(attribList[i]);
+            out.add(attribList[i + 1]);
+        }
+        out.add(EGL_SAMPLE_BUFFERS); out.add(sampleBuffers);
+        out.add(EGL_SAMPLES); out.add(samples);
+        out.add(EGL_NONE);
+        int[] a = new int[out.size()];
+        for (int i = 0; i < a.length; i++) a[i] = out.get(i);
+        return a;
+    }
+
     private static RealDisplay obtainDisplay() {
         synchronized (MacApkEGL10.class) {
             if (sDisplay != null) return sDisplay;
+            if (WINDOWS_BACKEND) {
+                // Probed once: a machine with no usable backend keeps the
+                // legacy contract without re-trying on every eglGetDisplay.
+                if (sWindowsTried) return null;
+                sWindowsTried = true;
+                android.opengl.EGLDisplay h = obtainWindowsDisplay();
+                if (h == null) return null;
+                sDisplay = new RealDisplay(h);
+                return sDisplay;
+            }
             android.opengl.EGLDisplay h = EGL15.eglGetPlatformDisplay(
                 EGL_PLATFORM_ANGLE_ANGLE, DISPLAY_TOKEN,
                 new long[] {
@@ -402,7 +531,8 @@ public final class MacApkEGL10 implements EGL10 {
             // hands back the same cached object for the same handle.
             RealDisplay d = obtainDisplay();
             if (d != null) return d;
-            NativeLog.w(TAG, "eglGetPlatformDisplay(ANGLE Metal) failed; legacy EGL10 answers");
+            NativeLog.w(TAG, "eglGetPlatformDisplay(ANGLE " + (WINDOWS_BACKEND ? "Windows" : "Metal")
+                + ") failed; legacy EGL10 answers");
         } catch (Throwable t) {
             realBroken(t);
         }
@@ -438,6 +568,11 @@ public final class MacApkEGL10 implements EGL10 {
         synchronized (d) {
             if (d.refs == 0) return true;
             d.refs--;
+            // The Windows host has no such shim (EGL14's display_ref lookup
+            // finds nothing in ANGLE's DLLs), so every EGL14.eglTerminate would
+            // reach ANGLE: the count kept here decides instead, and only the
+            // last terminate goes down.
+            if (WINDOWS_BACKEND && d.refs > 0) return true;
         }
         nativeCall();
         return EGL14.eglTerminate(d.h);
@@ -452,6 +587,15 @@ public final class MacApkEGL10 implements EGL10 {
         int[] num = new int[1];
         nativeCall();
         boolean ok = EGL14.eglChooseConfig(d.h, attribList, 0, tmp, 0, size, num, 0);
+        int[] closest = (ok && num[0] == 0) ? windowsMsaaFallback(d, attribList) : null;
+        if (closest != null) {
+            ok = EGL14.eglChooseConfig(d.h, closest, 0, tmp, 0, size, num, 0);
+            if (shouldLogReal()) {
+                NativeLog.i(TAG, "eglChooseConfig " + attribsToString(attribList)
+                    + ": no ANGLE config has that many samples; offering the closest, "
+                    + attribsToString(closest));
+            }
+        }
         if (numConfig != null && numConfig.length >= 1) numConfig[0] = num[0];
         if (ok && tmp != null) {
             for (int i = 0; i < num[0] && i < size; i++) configs[i] = wrapConfig(d, tmp[i]);
