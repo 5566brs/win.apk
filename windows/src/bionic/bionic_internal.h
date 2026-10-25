@@ -17,6 +17,10 @@
 
 #include "winapk/guest_abi.h"
 
+namespace winapk {
+struct SysVVaList;  // abi_thunk.h
+}  // namespace winapk
+
 namespace winapk::bionic {
 
 // Guest C types whose size differs on Windows: Android's `long` is 64 bits
@@ -47,6 +51,7 @@ ShimTable fd_symbols();       // fd.cpp: pipe, eventfd, poll, select, epoll
 ShimTable socket_symbols();
 ShimTable looper_symbols();   // looper.cpp: the NDK's ALooper   // socket.cpp: BSD sockets on Winsock, getaddrinfo, inet_*
 ShimTable locale_symbols();   // locale.cpp: <locale.h>, UTF-8 conversion, <wctype.h>, more <wchar.h>
+ShimTable zlib_symbols();     // zlib.cpp: libz.so, on the host's zlib
 
 // ---- errno ------------------------------------------------------------------
 
@@ -78,6 +83,9 @@ size_t file_write(void* guest_file, const char* data, size_t n);
 int64_t fd_write(int fd, const void* data, size_t n);
 void* guest_stdout();
 void* guest_stderr();
+
+// printf.cpp: what vasprintf makes of a guest format string and va_list.
+std::string format_va(const char* fmt, SysVVaList* va);
 
 // paths.cpp: the host path for a guest path (Android's absolute paths are
 // mapped under the android root; see paths.cpp).

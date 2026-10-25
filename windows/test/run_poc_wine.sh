@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # run_poc_wine.sh -- build the phase-1 PoC on Linux and run it under Wine.
 #
-# Needs: clang, lld, cmake, ninja, mingw-w64 (headers/CRT), wine64.
-#   Ubuntu: apt install clang lld cmake ninja-build mingw-w64 wine64
+# Needs: clang, lld, cmake, ninja, mingw-w64 (headers/CRT), zlib for mingw-w64, wine64.
+#   Ubuntu: apt install clang lld cmake ninja-build mingw-w64 libz-mingw-w64-dev wine64
 #
 # Wine is a convenience, not the verdict: the CI job on a real Windows runner
 # (.github/workflows/windows-poc.yml) is what counts.

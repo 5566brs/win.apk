@@ -63,6 +63,7 @@ jobs:
             clang:p
             cmake:p
             ninja:p
+            zlib:p
       - uses: actions/download-artifact@v4
         with:
           name: guest-libs
