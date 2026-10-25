@@ -245,9 +245,9 @@ implements in `runtime/src`; on Windows `windows/host/native_*.cpp`):
 | `bionic_shim_vulkan.cpp` | 401 | Vulkan over MoltenVK | the system Vulkan loader (M6) | not started |
 | `bionic_shim_cacerts.cpp` | 218 | CA store from the Mac's roots | the Windows root store | not started |
 | `bionic_shim_forkwatch.cpp`, `_elfexec.cpp`, `elfexec_main.cpp` | 1,471 | forked and shipped executables | later (M5) | not started |
-| `media_ndk.cpp` | 701 | NDK `AMediaCodec` | port with `NativeMedia` | not started |
+| `media_ndk.cpp` | 701 | NDK `AMediaCodec` | port with `NativeMedia`; `host/native_media.cpp` has the `AMEDIAFORMAT_KEY_*` strings | keys only |
 | `bionic_shim.cpp`: `ANativeWindow_*`, `AAssetManager_*` | - | libandroid's native window and assets | `host/native_window.cpp`, `host/native_asset.cpp` (assets through Java's AssetManager; no native APK index yet) | done |
-| `bionic_shim.cpp`: OpenSL ES | - | libOpenSLES on the audio mixer | `host/native_opensles.cpp`: reports the engine unsupported | not started |
+| `bionic_shim.cpp`: OpenSL ES | - | libOpenSLES on the audio mixer | `host/native_opensles.cpp`: reports the engine unsupported; the `SL_IID_*` interface IDs are real | not started |
 | `bionic_shim.cpp`: libjnigraphics | - | `AndroidBitmap_*` | `src/jnigraphics.cpp`: upstream's section, extracted at build time | done |
 | `pairip_*`, `art_jni_offsets.h` | 5,286 | Play Integrity emulation | later | - |
 | `arm32_lifter.cpp`, `bionic_shim_arm32*.cpp`, `bionic_shim_gles1.cpp`, `elf_reader.cpp`, `elf64_reader.cpp` | 19,296 | ARM translation | n/a (D8: the ARM stage) | - |
