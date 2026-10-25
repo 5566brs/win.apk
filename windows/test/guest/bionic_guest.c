@@ -718,6 +718,75 @@ static void test_zlib(const char* dir) {
     free(back2);
 }
 
+// ---- rand48, statfs, getopt ---------------------------------------------------------
+long lrand48(void);
+long mrand48(void);
+double drand48(void);
+void srand48(long);
+long nrand48(unsigned short[3]);
+long jrand48(unsigned short[3]);
+unsigned short* seed48(unsigned short[3]);
+// Bionic's struct statfs on x86_64 (the kernel's: 64-bit fields, f_fsid two ints).
+struct statfs { unsigned long f_type, f_bsize, f_blocks, f_bfree, f_bavail, f_files, f_ffree; int f_fsid[2];
+                unsigned long f_namelen, f_frsize, f_flags, f_spare[4]; };
+int statfs(const char*, struct statfs*);
+int fstatfs(int, struct statfs*);
+struct option { const char* name; int has_arg; int* flag; int val; };
+int getopt(int, char* const*, const char*);
+int getopt_long(int, char* const*, const char*, const struct option*, int*);
+extern char* optarg;
+extern int optind;
+
+static void test_rand48_statfs_getopt(const char* dir) {
+    // rand48 is fully specified by POSIX; glibc gives the same values.
+    srand48(12345);
+    const long l1 = lrand48(), l2 = lrand48(), m3 = mrand48();
+    const double d4 = drand48();
+    check("srand48, then lrand48/mrand48/drand48",
+          l1 == 483889296 && l2 == 1973930609 && m3 == 888376418 && d4 > 0.72477972027 && d4 < 0.72477972028, 0);
+    srand48(7);
+    mrand48();
+    check("mrand48 is signed 32-bit", mrand48() == -1365648288L, 0);
+    unsigned short xs[3] = {0x1111, 0x2222, 0x3333};
+    const long n = nrand48(xs), j = jrand48(xs);
+    check("nrand48/jrand48 step the caller's state", n == 175951553 && j == 1299530545, 0);
+    unsigned short seed[3] = {0x330e, 12345, 0};  // what srand48(12345) sets
+    check("seed48 returns the previous state and sets the new one", seed48(seed) != 0 && lrand48() == 483889296, 0);
+
+    struct statfs sd, sf;
+    char path[512];
+    snprintf(path, sizeof path, "%s/statfs_probe.txt", dir);
+    const int fd = open(path, 01 | 0100 | 01000, 0644);  // O_WRONLY | O_CREAT | O_TRUNC
+    check("statfs on a directory: ext4's magic, 4 KiB blocks, sane counts",
+          statfs(dir, &sd) == 0 && sd.f_type == 0xef53 && sd.f_bsize == 4096 && sd.f_frsize == 4096 &&
+              sd.f_blocks > 0 && sd.f_bavail <= sd.f_bfree && sd.f_bfree <= sd.f_blocks && sd.f_namelen == 255, 0);
+    check("statfs on a file, and fstatfs, see the same filesystem",
+          fd >= 0 && statfs(path, &sf) == 0 && sf.f_blocks == sd.f_blocks && fstatfs(fd, &sf) == 0 &&
+              sf.f_blocks == sd.f_blocks, 0);
+    if (fd >= 0) close(fd);
+    unlink(path);
+    *__errno() = 0;
+    check("statfs of a missing path: ENOENT", statfs("/no/such/dir", &sd) == -1 && *__errno() == 2, 0);
+
+    char* args[] = {"prog", "-a", "-b", "val", "--long=x", "rest", 0};
+    static const struct option longs[] = {{"long", 1, 0, 'L'}, {0, 0, 0, 0}};
+    char seen[64] = {0};
+    int k = 0;
+    for (int c; (c = getopt_long(6, args, "ab:", longs, 0)) != -1 && k < 40;) {
+        seen[k++] = (char)c;
+        if ((c == 'b' || c == 'L') && optarg) {
+            seen[k++] = '=';
+            for (const char* q = optarg; *q && k < 50; ++q) seen[k++] = *q;
+        }
+        seen[k++] = ' ';
+    }
+    check_str("getopt_long and optarg", seen, "a b=val L=x ");
+    check("optind stops at the first operand", optind == 5, 0);
+    optind = 1;
+    char* again[] = {"prog", "-b", "v", 0};
+    check("optind = 1 restarts getopt", getopt(3, again, "ab:") == 'b' && strcmp(optarg, "v") == 0 && optind == 3, 0);
+}
+
 // ---- the rest -------------------------------------------------------------------------
 static void test_misc(void) {
     struct timespec a, b2;
@@ -761,6 +830,7 @@ EXPORT int bionic_test(const char* dir) {
     test_looper();
     test_files(dir);
     test_zlib(dir);
+    test_rand48_statfs_getopt(dir);
     test_misc();
     return failures;
 }

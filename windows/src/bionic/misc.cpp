@@ -23,6 +23,10 @@
 #include <io.h>
 #include <windows.h>
 #include <bcrypt.h>
+#include <getopt.h>
+
+// BSD's optreset, which <getopt.h> declares only under _BSD_SOURCE.
+extern "C" int __mingw_optreset;
 
 namespace winapk::bionic {
 
@@ -628,6 +632,90 @@ WINAPK_GUEST_ABI int g_rand() {
     return static_cast<int>((g_rand_state >> 33) & 0x7fffffff);
 }
 
+// The rand48 family: POSIX's 48-bit linear congruential generator,
+// X' = (a * X + c) mod 2^48 with a = 0x5DEECE66D and c = 0xB unless lcong48
+// changed them. X, a and c are kept as 16-bit words, low word first, the way
+// Bionic's (NetBSD's) rand48 keeps them, and start from the same seed.
+// The e/n/j forms step the caller's X with the shared a and c.
+std::mutex g_rand48_lock;
+uint16_t g_rand48_seed[3] = {0x330e, 0xabcd, 0x1234};
+uint16_t g_rand48_mult[3] = {0xe66d, 0xdeec, 0x0005};
+uint16_t g_rand48_add = 0x000b;
+
+uint64_t rand48_value(const uint16_t x[3]) { return x[0] | uint64_t{x[1]} << 16 | uint64_t{x[2]} << 32; }
+
+// One step of `x`, returning the new 48-bit X.
+uint64_t rand48_step(uint16_t x[3]) {
+    std::lock_guard<std::mutex> hold(g_rand48_lock);
+    const uint64_t next = (rand48_value(g_rand48_mult) * rand48_value(x) + g_rand48_add) & ((uint64_t{1} << 48) - 1);
+    x[0] = static_cast<uint16_t>(next);
+    x[1] = static_cast<uint16_t>(next >> 16);
+    x[2] = static_cast<uint16_t>(next >> 32);
+    return next;
+}
+
+void rand48_reset_params() {
+    g_rand48_mult[0] = 0xe66d;
+    g_rand48_mult[1] = 0xdeec;
+    g_rand48_mult[2] = 0x0005;
+    g_rand48_add = 0x000b;
+}
+
+// [0, 1): X / 2^48.
+double rand48_double(uint64_t x) { return std::ldexp(static_cast<double>(x), -48); }
+// [0, 2^31): the top 31 bits.
+glong rand48_nonnegative(uint64_t x) { return static_cast<glong>(x >> 17); }
+// [-2^31, 2^31): the top 32 bits, signed.
+glong rand48_signed(uint64_t x) { return static_cast<int32_t>(static_cast<uint32_t>(x >> 16)); }
+
+WINAPK_GUEST_ABI double g_drand48() { return rand48_double(rand48_step(g_rand48_seed)); }
+WINAPK_GUEST_ABI double g_erand48(uint16_t x[3]) { return rand48_double(rand48_step(x)); }
+WINAPK_GUEST_ABI glong g_lrand48() { return rand48_nonnegative(rand48_step(g_rand48_seed)); }
+WINAPK_GUEST_ABI glong g_nrand48(uint16_t x[3]) { return rand48_nonnegative(rand48_step(x)); }
+WINAPK_GUEST_ABI glong g_mrand48() { return rand48_signed(rand48_step(g_rand48_seed)); }
+WINAPK_GUEST_ABI glong g_jrand48(uint16_t x[3]) { return rand48_signed(rand48_step(x)); }
+
+WINAPK_GUEST_ABI void g_srand48(glong seed) {
+    std::lock_guard<std::mutex> hold(g_rand48_lock);
+    g_rand48_seed[0] = 0x330e;
+    g_rand48_seed[1] = static_cast<uint16_t>(seed);
+    g_rand48_seed[2] = static_cast<uint16_t>(seed >> 16);
+    rand48_reset_params();
+}
+
+WINAPK_GUEST_ABI uint16_t* g_seed48(const uint16_t x[3]) {
+    static uint16_t previous[3];
+    std::lock_guard<std::mutex> hold(g_rand48_lock);
+    std::memcpy(previous, g_rand48_seed, sizeof(previous));
+    std::memcpy(g_rand48_seed, x, sizeof(g_rand48_seed));
+    rand48_reset_params();
+    return previous;
+}
+
+WINAPK_GUEST_ABI void g_lcong48(const uint16_t p[7]) {
+    std::lock_guard<std::mutex> hold(g_rand48_lock);
+    std::memcpy(g_rand48_seed, p, sizeof(g_rand48_seed));
+    std::memcpy(g_rand48_mult, p + 3, sizeof(g_rand48_mult));
+    g_rand48_add = p[6];
+}
+
+// ---- getopt ------------------------------------------------------------------------------
+// MinGW's getopt, getopt_long and getopt_long_only are OpenBSD's
+// getopt_long.c, which is Bionic's too, and struct option has one layout on
+// both sides (name 0, has_arg 8, flag 16, val 24). So the guest's getopt is
+// the CRT's, and the guest's optarg, optind, opterr, optopt and optreset are
+// the CRT's own variables: a guest that sets optind back to 1 restarts the
+// parser it calls.
+WINAPK_GUEST_ABI int g_getopt(int argc, char* const* argv, const char* opts) { return ::getopt(argc, argv, opts); }
+WINAPK_GUEST_ABI int g_getopt_long(int argc, char* const* argv, const char* opts, const struct option* longopts,
+                                   int* index) {
+    return ::getopt_long(argc, argv, opts, longopts, index);
+}
+WINAPK_GUEST_ABI int g_getopt_long_only(int argc, char* const* argv, const char* opts,
+                                        const struct option* longopts, int* index) {
+    return ::getopt_long_only(argc, argv, opts, longopts, index);
+}
+
 // ---- process exit -------------------------------------------------------------------------
 [[noreturn]] WINAPK_GUEST_ABI void g_exit(int code) {
     mini_bionic_run_atexit();
@@ -760,6 +848,23 @@ const ShimSymbol kSymbols[] = {
     WINAPK_SHIM("rand", g_rand),
     WINAPK_SHIM("srandom", g_srand),
     WINAPK_SHIM("random", g_rand),
+    WINAPK_SHIM("drand48", g_drand48),
+    WINAPK_SHIM("erand48", g_erand48),
+    WINAPK_SHIM("lrand48", g_lrand48),
+    WINAPK_SHIM("nrand48", g_nrand48),
+    WINAPK_SHIM("mrand48", g_mrand48),
+    WINAPK_SHIM("jrand48", g_jrand48),
+    WINAPK_SHIM("srand48", g_srand48),
+    WINAPK_SHIM("seed48", g_seed48),
+    WINAPK_SHIM("lcong48", g_lcong48),
+    WINAPK_SHIM("getopt", g_getopt),
+    WINAPK_SHIM("getopt_long", g_getopt_long),
+    WINAPK_SHIM("getopt_long_only", g_getopt_long_only),
+    WINAPK_SHIM("optarg", optarg),
+    WINAPK_SHIM("optind", optind),
+    WINAPK_SHIM("opterr", opterr),
+    WINAPK_SHIM("optopt", optopt),
+    WINAPK_SHIM("optreset", __mingw_optreset),
     WINAPK_SHIM("exit", g_exit),
     WINAPK_SHIM("_exit", g__exit),
     WINAPK_SHIM("_Exit", g__exit),

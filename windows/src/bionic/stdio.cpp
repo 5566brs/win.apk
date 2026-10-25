@@ -388,8 +388,18 @@ struct GuestStatvfs {
 static_assert(sizeof(GuestStatvfs) == 112, "Bionic's struct statvfs on x86_64");
 int statvfs_of(const std::wstring& path, GuestStatvfs* out) {
     ULARGE_INTEGER avail, total, free_bytes;
-    if (!GetDiskFreeSpaceExW(path.c_str(), &avail, &total, &free_bytes)) {
-        set_errno_from_win32(GetLastError());
+    BOOL ok = GetDiskFreeSpaceExW(path.c_str(), &avail, &total, &free_bytes);
+    DWORD error = ok ? 0 : GetLastError();
+    // GetDiskFreeSpaceExW takes directories only; Linux answers for the
+    // filesystem of any path, a file's included.
+    wchar_t root[MAX_PATH];
+    if (!ok && GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES &&
+        GetVolumePathNameW(path.c_str(), root, MAX_PATH)) {
+        ok = GetDiskFreeSpaceExW(root, &avail, &total, &free_bytes);
+        if (!ok) error = GetLastError();
+    }
+    if (!ok) {
+        set_errno_from_win32(error);
         return -1;
     }
     std::memset(out, 0, sizeof(*out));
@@ -416,6 +426,58 @@ WINAPK_GUEST_ABI int g_fstatvfs(int fd, GuestStatvfs* out) {
         return -1;
     }
     return statvfs_of(root, out);
+}
+
+// Bionic's struct statfs on x86_64, which is also its struct statfs64: the
+// kernel's, where every field is a 64-bit __kernel_long_t except f_fsid (two
+// ints). Windows has no statfs, so it is filled from statvfs_of's answer:
+//
+//   field       offset  size   from
+//   f_type         0     8     ext4's magic (below)
+//   f_bsize        8     8     f_bsize
+//   f_blocks      16     8     f_blocks
+//   f_bfree       24     8     f_bfree
+//   f_bavail      32     8     f_bavail
+//   f_files       40     8     f_files
+//   f_ffree       48     8     f_ffree
+//   f_fsid        56     8     0 (int[2])
+//   f_namelen     64     8     f_namemax
+//   f_frsize      72     8     f_frsize
+//   f_flags       80     8     /data's mount flags (below)
+//   f_spare       88    32     0 (long[4])
+//   sizeof       120
+//
+// f_type and f_flags are what an Android /data reports, as upstream answers:
+// EXT4_SUPER_MAGIC 0xef53, and ST_VALID | ST_NOSUID | ST_NODEV | ST_NOATIME.
+struct GuestStatfs {
+    uint64_t f_type, f_bsize, f_blocks, f_bfree, f_bavail, f_files, f_ffree;
+    int32_t f_fsid[2];
+    uint64_t f_namelen, f_frsize, f_flags, f_spare[4];
+};
+static_assert(sizeof(GuestStatfs) == 120 && offsetof(GuestStatfs, f_fsid) == 56 &&
+                  offsetof(GuestStatfs, f_namelen) == 64 && offsetof(GuestStatfs, f_spare) == 88,
+              "Bionic's struct statfs on x86_64");
+int to_statfs(const GuestStatvfs& v, GuestStatfs* out) {
+    std::memset(out, 0, sizeof(*out));
+    out->f_type = 0xef53;
+    out->f_bsize = v.f_bsize;
+    out->f_blocks = v.f_blocks;
+    out->f_bfree = v.f_bfree;
+    out->f_bavail = v.f_bavail;
+    out->f_files = v.f_files;
+    out->f_ffree = v.f_ffree;
+    out->f_namelen = v.f_namemax;
+    out->f_frsize = v.f_frsize;
+    out->f_flags = 0x0426;
+    return 0;
+}
+WINAPK_GUEST_ABI int g_statfs(const char* path, GuestStatfs* out) {
+    GuestStatvfs v;
+    return statvfs_of(host_path(path), &v) < 0 ? -1 : to_statfs(v, out);
+}
+WINAPK_GUEST_ABI int g_fstatfs(int fd, GuestStatfs* out) {
+    GuestStatvfs v;
+    return g_fstatvfs(fd, &v) < 0 ? -1 : to_statfs(v, out);
 }
 
 // AT_FDCWD (-100) with a path, the common case of the *at() calls.
@@ -713,6 +775,10 @@ const ShimSymbol kSymbols[] = {
     WINAPK_SHIM("flock", g_flock),
     WINAPK_SHIM("statvfs", g_statvfs),
     WINAPK_SHIM("fstatvfs", g_fstatvfs),
+    WINAPK_SHIM("statfs", g_statfs),
+    WINAPK_SHIM("statfs64", g_statfs),
+    WINAPK_SHIM("fstatfs", g_fstatfs),
+    WINAPK_SHIM("fstatfs64", g_fstatfs),
     WINAPK_SHIM("fstatat64", g_fstatat),
     WINAPK_SHIM("access", g_access),
     WINAPK_SHIM("faccessat", g_faccessat),
