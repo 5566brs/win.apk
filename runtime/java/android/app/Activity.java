@@ -2074,8 +2074,20 @@ public class Activity extends ContextThemeWrapper
                 mMacapkWindowTitle = title;
                 if (mTitleView != null) mTitleView.setText(title);
             }
-            activity.setTitle(title);
+            // PhoneWindow.setTitle never calls back into the Activity: the
+            // Activity drives the Window (setTitle -> onTitleChanged ->
+            // win.setTitle), not the other way round. Re-entering here ran the
+            // APP's setTitle override from inside our own onPostCreate, and an
+            // app that forbids direct setTitle calls (Spotify's activities throw
+            // AssertionError "Don't call setTitle() directly") aborted there.
+            // The host caption does not depend on it (activeWindowTitle reads
+            // MACAPK_APP_LABEL, then getTitle()). MACAPK_WINDOW_TITLE_NO_REENTRY=0
+            // restores the call.
+            if (!MACAPK_WINDOW_TITLE_NO_REENTRY) activity.setTitle(title);
         }
+        /** MACAPK_WINDOW_TITLE_NO_REENTRY (default ON): see setTitle. */
+        static final boolean MACAPK_WINDOW_TITLE_NO_REENTRY =
+                !"0".equals(System.getenv("MACAPK_WINDOW_TITLE_NO_REENTRY"));
         /** PhoneWindow.setTitleColor (android14 :618-625): the title view's
          *  colour, remembered for a decor installed later. Window's base is an
          *  empty body (no title view). */
@@ -2873,12 +2885,13 @@ public class Activity extends ContextThemeWrapper
         if (win != null) win.setTitle(title);
     }
     /** Re-entrancy guard around onTitleChanged. AOSP's PhoneWindow keeps its
-     *  own title and never calls back into the Activity; OUR ActivityWindow
-     *  .setTitle routes Window.setTitle back into Activity.setTitle (so the
-     *  macOS titlebar tracks the activity title), which would otherwise make
-     *  setTitle -> onTitleChanged -> win.setTitle -> setTitle recurse forever.
-     *  Suppressing the nested dispatch keeps the observable contract (exactly
-     *  one onTitleChanged per app-initiated title change). */
+     *  own title and never calls back into the Activity, and neither does
+     *  ActivityWindow.setTitle since MACAPK_WINDOW_TITLE_NO_REENTRY; with that
+     *  gate at "0" it routes Window.setTitle back into Activity.setTitle, which
+     *  would otherwise make setTitle -> onTitleChanged -> win.setTitle ->
+     *  setTitle recurse forever. Suppressing the nested dispatch keeps the
+     *  observable contract (exactly one onTitleChanged per app-initiated title
+     *  change) either way. */
     private void macapkDispatchTitleChanged(CharSequence title, int color) {
         if (mDispatchingTitleChange) return;
         mDispatchingTitleChange = true;
