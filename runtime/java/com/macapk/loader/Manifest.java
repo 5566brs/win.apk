@@ -534,9 +534,9 @@ public final class Manifest {
     /** `<queries><provider android:authorities>`, split on ';' (matchesProviders). */
     public java.util.Set<String> queriesProviders = java.util.Collections.emptySet();
 
-    /** One `<intent-filter>`, flattened to the four dimensions AOSP's
-     *  IntentFilter.match() actually consults for the intents apps send
-     *  in-process: action, categories, data scheme, data MIME type.
+    /** One `<intent-filter>`, as the dimensions AOSP's IntentFilter.match()
+     *  consults for the intents apps send in-process: action, categories, and
+     *  the `<data>` constraints (scheme, MIME type, authority, path, ssp).
      *  AOSP reference: frameworks/base/core/java/android/content/
      *  IntentFilter.java match(action, type, scheme, data, categories,
      *  logTag) -- matchAction / matchData / matchCategories. */
@@ -555,8 +555,19 @@ public final class Manifest {
          *  of their own onMessageReceived, silently. */
         public final int priority;
         /** `<data android:host>` values, as written (AOSP keeps "*.example.com"
-         *  wildcards; AppLinks verifies the base domain for those). */
+         *  wildcards; AppLinks verifies the base domain for those, and
+         *  IntentFilter.AuthorityEntry matches them). */
         public final java.util.List<String> hosts;
+        /** android:port of the `<data>` element hosts.get(i) came from, or null.
+         *  AOSP ParsedIntentInfoUtils.parseData reads the two together
+         *  (`if (host != null) intentFilter.addDataAuthority(host, port)`), so a
+         *  port without a host on the same element is ignored. */
+        public final java.util.List<String> ports;
+        /** android:path / pathPrefix / pathPattern / pathAdvancedPattern /
+         *  pathSuffix, in parseData's order, as PatternMatcher types. */
+        public final java.util.List<DataPattern> paths;
+        /** android:ssp / sspPrefix / sspPattern / sspAdvancedPattern / sspSuffix. */
+        public final java.util.List<DataPattern> ssps;
         /** `android:autoVerify="true"` on the filter: the app asks the platform
          *  to verify its http(s) hosts as App Links (AppLinks.java). */
         public final boolean autoVerify;
@@ -572,6 +583,14 @@ public final class Manifest {
         public IntentFilterEntry(java.util.List<String> a, java.util.List<String> c,
                                  java.util.List<String> s, java.util.List<String> m,
                                  int priority, java.util.List<String> hosts, boolean autoVerify) {
+            this(a, c, s, m, priority, hosts, autoVerify, null, null, null);
+        }
+        public IntentFilterEntry(java.util.List<String> a, java.util.List<String> c,
+                                 java.util.List<String> s, java.util.List<String> m,
+                                 int priority, java.util.List<String> hosts, boolean autoVerify,
+                                 java.util.List<String> ports,
+                                 java.util.List<DataPattern> paths,
+                                 java.util.List<DataPattern> ssps) {
             this.actions    = a != null ? a : java.util.Collections.emptyList();
             this.categories = c != null ? c : java.util.Collections.emptyList();
             this.schemes    = s != null ? s : java.util.Collections.emptyList();
@@ -579,7 +598,33 @@ public final class Manifest {
             this.priority   = priority;
             this.hosts      = hosts != null ? hosts : java.util.Collections.emptyList();
             this.autoVerify = autoVerify;
+            java.util.List<String> p = ports;
+            if (p == null || p.size() != this.hosts.size()) {
+                // One port slot per host, null where none was declared.
+                java.util.List<String> fixed = new java.util.ArrayList<>(this.hosts.size());
+                for (int i = 0; i < this.hosts.size(); i++) {
+                    fixed.add(p != null && i < p.size() ? p.get(i) : null);
+                }
+                p = fixed;
+            }
+            this.ports      = p;
+            this.paths      = paths != null ? paths : java.util.Collections.emptyList();
+            this.ssps       = ssps != null ? ssps : java.util.Collections.emptyList();
         }
+    }
+
+    /** One `<data>` path or ssp constraint: the raw attribute value and the
+     *  android.os.PatternMatcher type its attribute name selects
+     *  (path/ssp = LITERAL, *Prefix = PREFIX, *Pattern = SIMPLE_GLOB,
+     *  *AdvancedPattern = ADVANCED_GLOB, *Suffix = SUFFIX). */
+    public static final class DataPattern {
+        public final String value;
+        public final int type;
+        public DataPattern(String value, int type) {
+            this.value = value;
+            this.type = type;
+        }
+        @Override public String toString() { return type + ":" + value; }
     }
 
     /** One `<activity>`, `<activity-alias>` or `<receiver>` element, carrying
@@ -1900,6 +1945,9 @@ public final class Manifest {
         java.util.List<String> schemes = new java.util.ArrayList<>();
         java.util.List<String> mimes   = new java.util.ArrayList<>();
         java.util.List<String> hosts   = new java.util.ArrayList<>();
+        java.util.List<String> ports   = new java.util.ArrayList<>();
+        java.util.List<DataPattern> paths = new java.util.ArrayList<>();
+        java.util.List<DataPattern> ssps  = new java.util.ArrayList<>();
         NodeList kids = f.getChildNodes();
         for (int i = 0; i < kids.getLength(); ++i) {
             Node n = kids.item(i);
@@ -1911,13 +1959,29 @@ public final class Manifest {
                 case "category": if (v != null && !v.isEmpty()) cats.add(v);    break;
                 case "data": {
                     // AOSP allows several <data> elements, each contributing
-                    // independently to the filter's scheme / type sets.
+                    // independently to the filter's scheme / type / authority /
+                    // path sets (ParsedIntentInfoUtils.parseData, android14-release,
+                    // reads the attributes below in this order).
                     String s = e.getAttributeNS(ANDROID_NS, "scheme");
                     if (s != null && !s.isEmpty()) schemes.add(s);
                     String m = e.getAttributeNS(ANDROID_NS, "mimeType");
                     if (m != null && !m.isEmpty()) mimes.add(m);
+                    addDataPattern(e, "ssp", android.os.PatternMatcher.PATTERN_LITERAL, ssps);
+                    addDataPattern(e, "sspPrefix", android.os.PatternMatcher.PATTERN_PREFIX, ssps);
+                    addDataPattern(e, "sspPattern", android.os.PatternMatcher.PATTERN_SIMPLE_GLOB, ssps);
+                    addDataPattern(e, "sspAdvancedPattern", android.os.PatternMatcher.PATTERN_ADVANCED_GLOB, ssps);
+                    addDataPattern(e, "sspSuffix", android.os.PatternMatcher.PATTERN_SUFFIX, ssps);
                     String h = e.getAttributeNS(ANDROID_NS, "host");
-                    if (h != null && !h.isEmpty()) hosts.add(h);
+                    if (h != null && !h.isEmpty()) {
+                        hosts.add(h);
+                        String p = e.getAttributeNS(ANDROID_NS, "port");
+                        ports.add(p != null && !p.isEmpty() ? p : null);
+                    }
+                    addDataPattern(e, "path", android.os.PatternMatcher.PATTERN_LITERAL, paths);
+                    addDataPattern(e, "pathPrefix", android.os.PatternMatcher.PATTERN_PREFIX, paths);
+                    addDataPattern(e, "pathPattern", android.os.PatternMatcher.PATTERN_SIMPLE_GLOB, paths);
+                    addDataPattern(e, "pathAdvancedPattern", android.os.PatternMatcher.PATTERN_ADVANCED_GLOB, paths);
+                    addDataPattern(e, "pathSuffix", android.os.PatternMatcher.PATTERN_SUFFIX, paths);
                     break;
                 }
                 default: break;
@@ -1932,7 +1996,15 @@ public final class Manifest {
         // app's real handler and makes the whole ranking inert.
         int prio = attrInt(f, "priority", 0);
         boolean autoVerify = "true".equalsIgnoreCase(f.getAttributeNS(ANDROID_NS, "autoVerify"));
-        return new IntentFilterEntry(actions, cats, schemes, mimes, prio, hosts, autoVerify);
+        return new IntentFilterEntry(actions, cats, schemes, mimes, prio, hosts, autoVerify,
+                ports, paths, ssps);
+    }
+
+    /** One `<data>` path / ssp attribute, when present, as a DataPattern. */
+    private static void addDataPattern(Element data, String attr, int type,
+                                       java.util.List<DataPattern> out) {
+        String v = data.getAttributeNS(ANDROID_NS, attr);
+        if (v != null && !v.isEmpty()) out.add(new DataPattern(v, type));
     }
 
     /** An android:-namespaced attribute, or null when absent/empty. */
