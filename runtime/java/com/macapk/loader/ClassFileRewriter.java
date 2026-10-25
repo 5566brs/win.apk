@@ -420,6 +420,19 @@ public final class ClassFileRewriter {
                 }
             }
 
+            // ---- Pattern N -- Android's native-library names and loads ----
+            // See ONDEMAND_NATIVE below. Windows hosts only.
+            if (ONDEMAND_NATIVE) {
+                int patchedN = patternNNativeLibraries(cf, className);
+                if (patchedN > 0) {
+                    if (DEBUG) {
+                        System.err.println("[rewriter] " + className
+                            + ": Pattern-N routed " + patchedN + " mapLibraryName/load call(s)");
+                    }
+                    hits += patchedN;
+                }
+            }
+
             if (hits > 0) {
                 byte[] out = cf.serialize();
                 if (DEBUG) {
@@ -602,6 +615,15 @@ public final class ClassFileRewriter {
             if (ANDROID_FILE_SEPARATOR
                 && containsNeedle(raw, NEEDLE_SEPARATOR)
                 && containsNeedle(raw, NEEDLE_JAVA_IO_FILE)) {
+                return true;
+            }
+            // Pattern N: a Methodref to System.mapLibraryName, or to a method
+            // named exactly "load" (a length-4 UTF8 entry) of System or Runtime.
+            if (ONDEMAND_NATIVE
+                && (containsNeedle(raw, NEEDLE_MAP_LIBRARY_NAME)
+                    || (containsNeedle(raw, NEEDLE_LOAD_NAME)
+                        && (containsNeedle(raw, NEEDLE_JAVA_LANG_SYSTEM)
+                            || containsNeedle(raw, NEEDLE_JAVA_LANG_RUNTIME))))) {
                 return true;
             }
             if (containsNeedle(raw, NEEDLE_CLINIT)
@@ -1134,8 +1156,8 @@ public final class ClassFileRewriter {
     // it is on Android.
     //
     // Left alone on purpose: File.pathSeparator (Android's ':' would clash
-    // with drive letters), System.mapLibraryName (Win.apk's SoLoader support
-    // needs "x.dll"), and the file.separator system property.
+    // with drive letters) and the file.separator system property.
+    // System.mapLibraryName is Pattern N's (below).
     //
     // Only on a Windows host (System.mapLibraryName gives ".dll"); macOS
     // already has '/'. MACAPK_ANDROID_FILE_SEPARATOR=0 turns it off.
@@ -1177,23 +1199,8 @@ public final class ClassFileRewriter {
         int rewritten = 0;
         byte[] bc = cf.raw;
         for (int methodOff : cf.methodOffsets) {
-            // The method's attribute named Code (parseMethod's MethodEntry.code
-            // is only its first attribute).
-            int codeStart = -1, codeLen = 0;
-            int off = methodOff + 6;
-            int attrs = u2(bc, off);
-            off += 2;
-            for (int a = 0; a < attrs; a++) {
-                int nameIdx = u2(bc, off);
-                int alen = u4(bc, off + 2);
-                if (codeStart < 0 && alen >= 8 && "Code".equals(cf.utf8(nameIdx))) {
-                    codeStart = off + 6 + 8;
-                    codeLen = u4(bc, off + 6 + 4);
-                }
-                off += 6 + alen;
-            }
-            if (codeStart < 0 || codeLen <= 0) continue;
-            final CodeAttr code = new CodeAttr(bc, codeStart, codeLen, 0);
+            final CodeAttr code = codeOf(cf, methodOff);
+            if (code == null) continue;
             int end = code.codeOffset + code.codeLen;
             int pc = code.codeOffset;
             while (pc < end) {
@@ -1212,6 +1219,142 @@ public final class ClassFileRewriter {
                         if (slash < 0) { pc += len; continue; }  // constant pool full
                         bc[pc] = (byte) OP_LDC_W;
                         writeU2(bc, pc + 1, slash);
+                        rewritten++;
+                    }
+                }
+                pc += len;
+            }
+        }
+        return rewritten;
+    }
+
+    /** The method's attribute named Code (parseMethod's MethodEntry.code is
+     *  only its first attribute), or null when it has none. */
+    private static CodeAttr codeOf(ClassFile cf, int methodOff) {
+        byte[] bc = cf.raw;
+        int off = methodOff + 6;
+        int attrs = u2(bc, off);
+        off += 2;
+        for (int a = 0; a < attrs; a++) {
+            int nameIdx = u2(bc, off);
+            int alen = u4(bc, off + 2);
+            if (alen >= 8 && "Code".equals(cf.utf8(nameIdx))) {
+                int codeLen = u4(bc, off + 6 + 4);
+                return codeLen > 0 ? new CodeAttr(bc, off + 6 + 8, codeLen, 0) : null;
+            }
+            off += 6 + alen;
+        }
+        return null;
+    }
+
+    // -----------------------------------------------------------------
+    // Pattern N -- Android's native-library names and loads (Windows host)
+    // -----------------------------------------------------------------
+    //
+    // Android's System.mapLibraryName("x") is "libx.so", and its System.load
+    // takes the path of an ELF. On the Windows JVM the first gives "x.dll" and
+    // the second takes only a host DLL, so an app that unpacks its own
+    // libraries and loads them by path failed on its FIRST run. WITNESSED
+    // (WhatsApp 2.26.42.71): SoLoader looked for "whatsappmerged.dll" in the
+    // superpack dir WhatsApp had just decompressed, found only
+    // libwhatsappmerged.so, threw SoLoaderDSONotFoundError, and WhatsApp
+    // showed CorruptInstallationActivity. Only the second launch worked,
+    // because by then the startup exposure (AppClassLoader.prepareDirectDlopenLibs)
+    // had found the files. ReLinker builds its names the same way: its APK
+    // fallback looked for lib/<abi>/flutter.dll, not libflutter.so.
+    //
+    // MECHANISM: in GUEST classes only, each call becomes a call of
+    // com.macapk.loader.NativeLoadBridge, in place and at the same length:
+    //   invokestatic  java/lang/System.mapLibraryName:(Ljava/lang/String;)Ljava/lang/String;
+    //                    -> invokestatic NativeLoadBridge.mapLibraryName, same descriptor
+    //   invokestatic  java/lang/System.load:(Ljava/lang/String;)V
+    //                    -> invokestatic NativeLoadBridge.load, same descriptor
+    //   invokevirtual java/lang/Runtime.load:(Ljava/lang/String;)V
+    //                    -> invokestatic NativeLoadBridge.load:(Ljava/lang/Runtime;Ljava/lang/String;)V
+    // Each consumes and pushes the same verification types as the call it
+    // replaces (the Runtime receiver becomes the first argument), so no
+    // StackMapTable entry, branch offset or max_stack changes. The bridge makes
+    // the stub an ELF needs on the spot (AppClassLoader.loadNativeOnDemand) and
+    // loads it in the CALLER's class loader, where System.load binds a
+    // library's natives. Reflective and method-handle calls of these methods
+    // are not call sites and stay the JDK's.
+    //
+    // Only on a Windows host (System.mapLibraryName gives ".dll"); macOS needs
+    // its translator's dylibs under the JVM's names. MACAPK_ONDEMAND_NATIVE=0
+    // turns it off and restores the old behaviour, the startup exposure alone.
+    static final boolean ONDEMAND_NATIVE = onDemandNativeEnabled();
+
+    private static boolean onDemandNativeEnabled() {
+        try {
+            if ("0".equals(System.getenv("MACAPK_ONDEMAND_NATIVE"))) return false;
+            return System.mapLibraryName("x").endsWith(".dll");
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static final byte[] NEEDLE_MAP_LIBRARY_NAME =
+        "mapLibraryName".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+    /** A CONSTANT_Utf8 "load": its u2 length 4, then the bytes. */
+    private static final byte[] NEEDLE_LOAD_NAME = {0, 4, 'l', 'o', 'a', 'd'};
+    private static final byte[] NEEDLE_JAVA_LANG_SYSTEM =
+        "java/lang/System".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+    private static final byte[] NEEDLE_JAVA_LANG_RUNTIME =
+        "java/lang/Runtime".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+
+    private static final String NATIVE_LOAD_BRIDGE = "com/macapk/loader/NativeLoadBridge";
+    private static final int N_MAP = 1, N_SYSTEM_LOAD = 2, N_RUNTIME_LOAD = 3;
+
+    /** Rewrites every call of System.mapLibraryName, System.load and
+     *  Runtime.load in the class's methods. Returns the number rewritten. */
+    private static int patternNNativeLibraries(ClassFile cf, String className) {
+        int[] kind = null;   // CP index -> N_*, for the class's own Methodrefs
+        for (int i = 1; i < cf.cpEntries.size(); i++) {
+            CpEntry e = cf.cpEntries.get(i);
+            if (e == null || e.added || e.tag != CP_METHODREF) continue;
+            int k = 0;
+            if (isMethodref(cf, i, "java/lang/System", "mapLibraryName",
+                            "(Ljava/lang/String;)Ljava/lang/String;")) k = N_MAP;
+            else if (isMethodref(cf, i, "java/lang/System", "load", "(Ljava/lang/String;)V")) k = N_SYSTEM_LOAD;
+            else if (isMethodref(cf, i, "java/lang/Runtime", "load", "(Ljava/lang/String;)V")) k = N_RUNTIME_LOAD;
+            if (k == 0) continue;
+            if (kind == null) kind = new int[cf.cpEntries.size()];
+            kind[i] = k;
+        }
+        if (kind == null) return 0;
+        // At most 12 new entries (the Class and its Utf8, 4 more Utf8, 3
+        // NameAndType, 3 Methodref); a pool that close to full stays as it is.
+        if (cf.cpEntries.size() + 12 > 0xFFFF) return 0;
+        int[] target = new int[4];   // N_* -> the bridge Methodref, made on first use
+        int bridge = 0;              // its Class entry, likewise
+        int rewritten = 0;
+        byte[] bc = cf.raw;
+        for (int methodOff : cf.methodOffsets) {
+            final CodeAttr code = codeOf(cf, methodOff);
+            if (code == null) continue;
+            int end = code.codeOffset + code.codeLen;
+            int pc = code.codeOffset;
+            while (pc < end) {
+                int op = bc[pc] & 0xFF;
+                int len = exactInstructionLength(op, bc, pc, code.codeOffset);
+                if (len <= 0 || pc + len > end) break;
+                if (op == OP_INVOKESTATIC || op == OP_INVOKEVIRTUAL) {
+                    int ref = u2(bc, pc + 1);
+                    int k = ref < kind.length ? kind[ref] : 0;
+                    boolean match = op == OP_INVOKEVIRTUAL ? k == N_RUNTIME_LOAD
+                                                           : k == N_MAP || k == N_SYSTEM_LOAD;
+                    if (match) {
+                        if (target[k] == 0) {
+                            if (bridge == 0) bridge = cf.findOrAddClass(NATIVE_LOAD_BRIDGE);
+                            int nt = k == N_MAP
+                                ? cf.findOrAddNameAndType("mapLibraryName", "(Ljava/lang/String;)Ljava/lang/String;")
+                                : k == N_SYSTEM_LOAD
+                                ? cf.findOrAddNameAndType("load", "(Ljava/lang/String;)V")
+                                : cf.findOrAddNameAndType("load", "(Ljava/lang/Runtime;Ljava/lang/String;)V");
+                            target[k] = cf.findOrAddMethodref(bridge, nt);
+                        }
+                        bc[pc] = (byte) OP_INVOKESTATIC;
+                        writeU2(bc, pc + 1, target[k]);
                         rewritten++;
                     }
                 }
@@ -1817,6 +1960,46 @@ public final class ClassFileRewriter {
             str[0] = (byte) CP_STRING;
             writeU2(str, 1, utf);
             return appendRaw(CP_STRING, str);
+        }
+
+        /** The CP index of a CONSTANT_Utf8 holding `value` (ASCII): an
+         *  existing one, original or added, else a new one. */
+        int findOrAddUtf8(String value) {
+            byte[] b = value.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+            byte[] entry = new byte[3 + b.length];
+            entry[0] = (byte) CP_UTF8;
+            writeU2(entry, 1, b.length);
+            System.arraycopy(b, 0, entry, 3, b.length);
+            return findOrAppendRaw(CP_UTF8, entry);
+        }
+
+        /** The CP index of a CONSTANT_Class naming `internalName`. */
+        int findOrAddClass(String internalName) {
+            int name = findOrAddUtf8(internalName);
+            return findOrAppendRaw(CP_CLASS, new byte[] {
+                (byte) CP_CLASS, (byte) (name >> 8), (byte) name });
+        }
+
+        /** The CP index of a CONSTANT_NameAndType for (name, descriptor). */
+        int findOrAddNameAndType(String name, String desc) {
+            int n = findOrAddUtf8(name), d = findOrAddUtf8(desc);
+            return findOrAppendRaw(CP_NAMEANDTYPE, new byte[] {
+                (byte) CP_NAMEANDTYPE, (byte) (n >> 8), (byte) n, (byte) (d >> 8), (byte) d });
+        }
+
+        /** An entry with exactly these bytes (tag included), original or
+         *  added, else a new one. */
+        private int findOrAppendRaw(int tag, byte[] bytes) {
+            for (int i = 1; i < cpEntries.size(); ++i) {
+                CpEntry e = cpEntries.get(i);
+                if (e == null || e.tag != tag || e.size != bytes.length) continue;
+                if (e.added) {
+                    if (java.util.Arrays.equals(e.addedRaw, bytes)) return i;
+                } else if (java.util.Arrays.equals(raw, e.offset, e.offset + e.size, bytes, 0, bytes.length)) {
+                    return i;
+                }
+            }
+            return appendRaw(tag, bytes);
         }
 
         private int appendRaw(int tag, byte[] bytes) {

@@ -117,6 +117,24 @@ jobs:
           cp="$(cygpath -w runtime/lib/macapk-loader.jar);$(cygpath -w build/sep-test)"
           "$JAVA_HOME/bin/java" -cp "$cp" FileSeparatorRewriteTest
           MACAPK_ANDROID_FILE_SEPARATOR=0 "$JAVA_HOME/bin/java" -cp "$cp" FileSeparatorRewriteTest off
+      - name: Run the on-demand native load test
+        run: |
+          # Guest System.mapLibraryName gives "libX.so", and System.load of an
+          # ELF gets a stub on the spot, bound to the app's class loader. The
+          # stub is a JNI fixture the real translator copies. Then again with
+          # the switch off.
+          export JAVA_HOME="$(cygpath -u "$JAVA_HOME")"
+          mkdir -p build/ondemand-test/stub build/ondemand-test/tmp
+          clang -shared -O2 -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/win32" \
+            -o build/ondemand-test/stub/winapk-guest-stub.dll windows/test/java/OnDemandStubFixture.c
+          cp runtime/bin/macapk-translator.exe build/ondemand-test/stub/
+          jars="$(cygpath -w runtime/lib/macapk-loader.jar);$(cygpath -w runtime/lib/android-framework.jar)"
+          "$JAVA_HOME/bin/javac" -cp "$jars" -d build/ondemand-test windows/test/java/OnDemandNativeLoadTest.java
+          cp="$jars;$(cygpath -w build/ondemand-test)"
+          tmp="-Djava.io.tmpdir=$(cygpath -w build/ondemand-test/tmp)"
+          translator="$(cygpath -w build/ondemand-test/stub/macapk-translator.exe)"
+          "$JAVA_HOME/bin/java" "$tmp" -cp "$cp" OnDemandNativeLoadTest "$translator"
+          MACAPK_ONDEMAND_NATIVE=0 "$JAVA_HOME/bin/java" "$tmp" -cp "$cp" OnDemandNativeLoadTest "$translator" off
       - name: Run the GL test
         run: |
           # It needs ANGLE next to it, which staging just put in runtime/bin.
