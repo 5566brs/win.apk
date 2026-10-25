@@ -2599,6 +2599,7 @@ public final class Boot {
         //   MACAPK_LAUNCH_ACTIVITY=<class>  (leading '.' => prefix package)
         //   MACAPK_LAUNCH_ACTION=<action>   (optional; default ACTION_MAIN)
         //   MACAPK_LAUNCH_EXTRAS=k1=v1;k2=v2 (optional; String extras)
+        //   MACAPK_LAUNCH_DATA=<uri>        (optional; the data Uri, `am start -d`)
         {
             String ovAct = System.getenv("MACAPK_LAUNCH_ACTIVITY");
             if (ovAct != null && !ovAct.isEmpty()) {
@@ -2618,8 +2619,11 @@ public final class Boot {
                         }
                     }
                 }
+                String data = System.getenv("MACAPK_LAUNCH_DATA");
+                if (data != null && !data.isEmpty()) intent.setData(android.net.Uri.parse(data));
                 NativeLog.i(TAG, "launch override -> " + cls
                         + " action=" + intent.getAction()
+                        + " data=" + intent.getDataString()
                         + " extras=" + extras);
             }
         }
