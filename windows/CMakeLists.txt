@@ -11,6 +11,8 @@
 
 cmake_minimum_required(VERSION 3.20)
 project(winapk LANGUAGES CXX)
+# Resource scripts: the programs' manifests and icons.
+enable_language(RC)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -147,7 +149,8 @@ if(WINAPK_JNI_INCLUDE)
                               host/audio_decode.cpp host/native_clipboard.cpp
                               host/native_wallpaper.cpp host/native_picker.cpp
                               host/native_gamepad.cpp host/native_icu.cpp
-                              host/native_audio_input.cpp host/native_photos.cpp)
+                              host/native_audio_input.cpp host/native_photos.cpp
+                              host/runtime.rc)
   target_link_libraries(winapk-runtime PRIVATE winapk_jni winapk_sqlite webpdecoder winapk_stb_vorbis windowscodecs
                         ole32 mfplat mfreadwrite mfuuid shlwapi advapi32 shell32 uuid)
   target_include_directories(winapk-runtime PRIVATE ${WINAPK_WEBP_DIR}/src)
@@ -197,7 +200,7 @@ if(WINAPK_JNI_INCLUDE)
   add_library(winapk-guest-stub SHARED host/guest_stub.cpp)
   set_target_properties(winapk-guest-stub PROPERTIES PREFIX "")
   target_include_directories(winapk-guest-stub PRIVATE "${WINAPK_JNI_INCLUDE}" "${WINAPK_JNI_INCLUDE}/win32")
-  add_executable(macapk-translator host/translator_main.cpp)
+  add_executable(macapk-translator host/translator_main.cpp host/runtime.rc)
   add_dependencies(winapk-runtime winapk-guest-stub macapk-translator)
 
   if(MINGW)
@@ -215,7 +218,6 @@ endif()
 # Win.apk.exe, the app library (launcher/launcher_main.cpp): installs APKs,
 # lists them, gives each a Start menu and desktop shortcut, and runs them
 # through winapk-runtime.
-enable_language(RC)
 add_executable(winapk-launcher WIN32 launcher/launcher_main.cpp launcher/launcher.rc)
 set_target_properties(winapk-launcher PROPERTIES OUTPUT_NAME "Win.apk")
 target_compile_definitions(winapk-launcher PRIVATE UNICODE _UNICODE _WIN32_WINNT=0x0A00 WINVER=0x0A00)
