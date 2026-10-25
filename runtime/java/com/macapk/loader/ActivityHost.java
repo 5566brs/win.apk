@@ -2688,6 +2688,14 @@ public final class ActivityHost {
         return s_externalUrlsOff;
     }
 
+    /** MACAPK_HOST_URL_DRY_RUN=1 (test hook, default off): openHost logs the
+     *  URL it would hand the host (NSWorkspace / ShellExecute) and reports it
+     *  opened, instead of opening it, so an unattended run never pops the
+     *  user's browser. Checked on the Java side, before the native call. */
+    private static final boolean HOST_URL_DRY_RUN =
+            "1".equals(System.getenv("MACAPK_HOST_URL_DRY_RUN"));
+    static boolean hostUrlDryRun() { return HOST_URL_DRY_RUN; }
+
     /** v1.0.849: the ONE policy choke point for handing a URL to the host.
      *  Everything that can open the macOS browser must come through here --
      *  ActivityHost's implicit-intent resolution and URLSpan.onClick both do.
@@ -2739,6 +2747,15 @@ public final class ActivityHost {
                         + " MACAPK_ALLOW_HOST_URL_AT_LAUNCH=1 to allow.");
                 return false;
             }
+        }
+        if (hostUrlDryRun()) {
+            // Test hook: everything up to the host call ran (resolution, both
+            // policy gates), and the open is reported as done so the app goes
+            // on as it would after a browser opened -- but no browser opens and
+            // no redirect scheme is claimed.
+            NativeLog.i(TAG, "MACAPK_HOST_URL_DRY_RUN: implicit intent " + action
+                    + " -> host open(" + uri + ") NOT performed (dry run)");
+            return true;
         }
         if (claim) HostUrlIntake.claimRedirectSchemes(uri);
         try {
