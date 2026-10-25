@@ -17,6 +17,10 @@
 // whole stack works: linker, native-method thunk, guest JNIEnv, the variadic
 // Call bridge, and env translation in both directions.
 //
+// When the class path also has the runtime's android-framework.jar (and
+// macapk-loader.jar), nativeBitmap runs libjnigraphics (src/jnigraphics.cpp)
+// on a real android.graphics.Bitmap; without them that check is skipped.
+//
 //   winapk-jvm-run <jni_guest.so> <classpath-dir>
 //
 // jvm.dll is found on PATH (CI adds the JDK; locally WINEPATH does).
@@ -24,6 +28,7 @@
 #include "winapk/guest_abi.h"
 #include "winapk/guest_jni.h"
 #include "winapk/jni_bind.h"
+#include "winapk/jnigraphics.h"
 #include "winapk/linker.h"
 #include "winapk/mini_bionic.h"
 
@@ -95,7 +100,11 @@ int main(int argc, char** argv) {
 
     winapk::LinkerConfig config;
     config.search_paths.push_back(so_path.parent_path());
-    config.host = winapk::mini_bionic_resolve;
+    // The Bionic shim and libjnigraphics, as the runtime's system libraries.
+    config.host = [](const char* name) -> void* {
+        if (void* p = winapk::mini_bionic_resolve(name)) return p;
+        return winapk::jnigraphics_resolve(name);
+    };
     winapk::GuestLinker linker(config);
     std::string err;
     void* lib = linker.open(so_path.u8string(), winapk::GuestLinker::kRtldNow, &err);
@@ -134,6 +143,23 @@ int main(int argc, char** argv) {
     const double want = 1 + 0.5 + 1099511627776.0 + 0.25;
     check("nativeMix(1, 0.5, 2^40, 0.25f), registered by the guest", std::fabs(mixed - want) < 1e-6,
           std::to_string(mixed));
+
+    // libjnigraphics on android.graphics.Bitmap, when the class path has the
+    // runtime's android-framework.jar (CI runs this test again after staging).
+    void* native_bitmap = linker.lookup(lib, "Java_WinApkJniTest_nativeBitmap", nullptr, &err);
+    if (!native_bitmap) return fail("guest does not export Java_WinApkJniTest_nativeBitmap");
+    JNINativeMethod b{const_cast<char*>("nativeBitmap"), const_cast<char*>("(Ljava/lang/Object;)I"), native_bitmap};
+    if (env->RegisterNatives(klass, &b, 1) != JNI_OK) return fail("RegisterNatives nativeBitmap");
+    jmethodID round_trip = env->GetStaticMethodID(klass, "bitmapRoundTrip", "()I");
+    if (!round_trip) return fail("GetStaticMethodID bitmapRoundTrip");
+    const jint bitmap = env->CallStaticIntMethod(klass, round_trip);
+    if (env->ExceptionCheck()) { env->ExceptionDescribe(); return fail("exception in bitmapRoundTrip"); }
+    if (bitmap == -1) {
+        std::printf("  [SKIP] AndroidBitmap_* on android.graphics.Bitmap: not on the class path\n");
+    } else {
+        check("AndroidBitmap_getInfo/lockPixels/unlockPixels on android.graphics.Bitmap", bitmap == 0,
+              bitmap == 0 ? std::string("RGBA_8888 premultiplied, written back") : "check " + std::to_string(bitmap));
+    }
 
     std::printf("\n%s: %d failure(s)\n", g_failures ? "FAILED" : "OK", g_failures);
     vm->DestroyJavaVM();

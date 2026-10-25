@@ -17,6 +17,8 @@
 #include "winapk/linker.h"
 #include "winapk/mini_bionic.h"
 
+#include "winapk/jnigraphics.h"
+
 #include "native_asset.h"
 #include "native_opensles.h"
 #include "native_window.h"
@@ -154,14 +156,15 @@ jstring JNICALL link_only(JNIEnv* env, jclass, jstring path) {
 }
 
 // The system libraries' functions: the Bionic shim's, then libEGL/libGLES and
-// libandroid's native window and assets and libOpenSLES, which live with the
-// host's GL, window, Java and audio.
+// libandroid's native window and assets, libOpenSLES and libjnigraphics, which
+// live with the host's GL, window, Java and audio.
 void* resolve_system(const char* name) {
     if (void* p = winapk::mini_bionic_resolve(name)) return p;
     if (void* p = winapk::host::guest_gl_resolve(name)) return p;
     if (void* p = winapk::host::native_window_resolve(name)) return p;
     if (void* p = winapk::host::native_asset_resolve(name)) return p;
-    return winapk::host::native_opensles_resolve(name);
+    if (void* p = winapk::host::native_opensles_resolve(name)) return p;
+    return winapk::jnigraphics_resolve(name);
 }
 
 const winapk::host::HostMethod kLinkerMethods[] = {
