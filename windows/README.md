@@ -115,6 +115,15 @@ from Java (`GLSurfaceView`, libGDX) on ANGLE, and so do apps that draw with
 OpenGL ES from their own native code through a SurfaceView (SDL games);
 `NativeActivity` apps and native audio (OpenSL ES, AAudio) are not there yet. App data goes to `%LOCALAPPDATA%\Win.apk`.
 
+The runtime and the app data may live in folders with names in any language,
+whatever "Language for non-Unicode programs" is set to: the runtime's manifest
+makes its ANSI code page UTF-8 (Windows 10 1903 and later), which is how the
+JVM gets such paths whole, and the steps that run in a separate JVM (install,
+DEX conversion) run in a child of `winapk-runtime.exe` rather than `java.exe`.
+Older Windows ignores the manifest; there the runtime passes the JVM 8.3 short
+names, which covers the app data, but the runtime's own folder needs plain
+letters (the JDK loads its DLLs by their long names).
+
 The app sees a 360x800 dp phone, the most common phone screen.
 `WINAPK_PHONE_SIZE=412x915` sets another size, in dp. The window shows the
 phone at the monitor's scale. When the whole window, title bar included, would
