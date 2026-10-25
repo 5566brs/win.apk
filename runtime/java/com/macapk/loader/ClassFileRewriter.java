@@ -407,6 +407,19 @@ public final class ClassFileRewriter {
                 }
             }
 
+            // ---- Pattern S -- Android's file separator in guest code ----
+            // See ANDROID_FILE_SEPARATOR below. Windows hosts only.
+            if (ANDROID_FILE_SEPARATOR) {
+                int patchedS = patternSAndroidFileSeparator(cf, className);
+                if (patchedS > 0) {
+                    if (DEBUG) {
+                        System.err.println("[rewriter] " + className
+                            + ": Pattern-S made " + patchedS + " File.separator(Char) read(s) '/'");
+                    }
+                    hits += patchedS;
+                }
+            }
+
             if (hits > 0) {
                 byte[] out = cf.serialize();
                 if (DEBUG) {
@@ -582,6 +595,13 @@ public final class ClassFileRewriter {
             }
             if (containsNeedle(raw, NEEDLE_RUN_FINALIZERS_ON_EXIT)
                 || containsNeedle(raw, FROM_BYTES_G)) {
+                return true;
+            }
+            // Pattern S: a Fieldref to java/io/File.separator(Char) needs both
+            // UTF8 entries ("separatorChar" contains "separator").
+            if (ANDROID_FILE_SEPARATOR
+                && containsNeedle(raw, NEEDLE_SEPARATOR)
+                && containsNeedle(raw, NEEDLE_JAVA_IO_FILE)) {
                 return true;
             }
             if (containsNeedle(raw, NEEDLE_CLINIT)
@@ -1081,6 +1101,159 @@ public final class ClassFileRewriter {
     }
 
     // -----------------------------------------------------------------
+    // Pattern S -- Android's file separator in guest code (Windows host)
+    // -----------------------------------------------------------------
+    //
+    // Android's java.io.File.separatorChar is '/' and File.separator "/";
+    // on the Windows JVM they are '\' and "\". App code is written for '/':
+    // it builds regexes, zip entry names and asset paths out of them.
+    // WITNESSED (Maccabi, com.ideomobile.maccabi): ReLinker's
+    // ApkLibraryInstaller compiles
+    //   "lib" + separatorChar + "([^\\" + separatorChar + "]*)" + separatorChar + name
+    // to match APK entries ("lib/arm64-v8a/libx.so"). With '\' the pattern
+    // is "lib\([^\\]*)\x.dll" -- an escaped '(' and an unmatched ')' --
+    // and its fallback died with PatternSyntaxException instead of the
+    // MissingLibraryException the app handles.
+    //
+    // MECHANISM: in GUEST classes only (this rewriter runs for classes the
+    // app's class loader defines; the framework and the JDK never pass
+    // through it), each read of the two fields becomes the Android value,
+    // in place and at the same length:
+    //   getstatic java/io/File.separatorChar:C                  -> bipush 47; nop
+    //   getstatic java/io/File.separator:Ljava/lang/String;     -> ldc_w "/"
+    // Both push the same verification type (int, java/lang/String) as the
+    // read they replace, so no StackMapTable or branch offset changes. The
+    // "/" String constant is reused when the class has one, else appended.
+    //
+    // File access keeps working: the JDK's WinNTFileSystem takes '/' in
+    // paths and normalizes it. What changes is code that takes paths the
+    // JDK returns (File.getPath() gives '\' on Windows) apart with the
+    // separator, e.g. path.lastIndexOf(File.separatorChar): on Windows such
+    // a path has no '/'. That code was right only on Windows before; the
+    // regex/zip-entry code above was wrong on Windows and is now right, as
+    // it is on Android.
+    //
+    // Left alone on purpose: File.pathSeparator (Android's ':' would clash
+    // with drive letters), System.mapLibraryName (Win.apk's SoLoader support
+    // needs "x.dll"), and the file.separator system property.
+    //
+    // Only on a Windows host (System.mapLibraryName gives ".dll"); macOS
+    // already has '/'. MACAPK_ANDROID_FILE_SEPARATOR=0 turns it off.
+    static final boolean ANDROID_FILE_SEPARATOR = androidFileSeparatorEnabled();
+
+    private static boolean androidFileSeparatorEnabled() {
+        try {
+            if ("0".equals(System.getenv("MACAPK_ANDROID_FILE_SEPARATOR"))) return false;
+            return System.mapLibraryName("x").endsWith(".dll") && java.io.File.separatorChar != '/';
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static final byte[] NEEDLE_SEPARATOR =
+        "separator".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+    private static final byte[] NEEDLE_JAVA_IO_FILE =
+        "java/io/File".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+
+    private static final int OP_BIPUSH = 0x10;
+    private static final int OP_LDC_W  = 0x13;
+
+    /** Rewrites every getstatic of java/io/File.separatorChar / .separator
+     *  in the class's methods. Returns the number of reads rewritten. */
+    private static int patternSAndroidFileSeparator(ClassFile cf, String className) {
+        int charRef = -1, stringRef = -1;
+        for (int i = 1; i < cf.cpEntries.size(); i++) {
+            CpEntry e = cf.cpEntries.get(i);
+            if (e == null || e.added || e.tag != CP_FIELDREF) continue;
+            if (!"java/io/File".equals(cf.classNameOf(cf.fieldrefClass(i)))) continue;
+            int nt = cf.fieldrefNameAndType(i);
+            String name = cf.utf8(cf.nameAndTypeName(nt));
+            String desc = cf.utf8(cf.nameAndTypeDescriptor(nt));
+            if ("separatorChar".equals(name) && "C".equals(desc)) charRef = i;
+            else if ("separator".equals(name) && "Ljava/lang/String;".equals(desc)) stringRef = i;
+        }
+        if (charRef < 0 && stringRef < 0) return 0;
+        int slash = -1;  // CP index of the String "/", made on first use
+        int rewritten = 0;
+        byte[] bc = cf.raw;
+        for (int methodOff : cf.methodOffsets) {
+            // The method's attribute named Code (parseMethod's MethodEntry.code
+            // is only its first attribute).
+            int codeStart = -1, codeLen = 0;
+            int off = methodOff + 6;
+            int attrs = u2(bc, off);
+            off += 2;
+            for (int a = 0; a < attrs; a++) {
+                int nameIdx = u2(bc, off);
+                int alen = u4(bc, off + 2);
+                if (codeStart < 0 && alen >= 8 && "Code".equals(cf.utf8(nameIdx))) {
+                    codeStart = off + 6 + 8;
+                    codeLen = u4(bc, off + 6 + 4);
+                }
+                off += 6 + alen;
+            }
+            if (codeStart < 0 || codeLen <= 0) continue;
+            final CodeAttr code = new CodeAttr(bc, codeStart, codeLen, 0);
+            int end = code.codeOffset + code.codeLen;
+            int pc = code.codeOffset;
+            while (pc < end) {
+                int op = bc[pc] & 0xFF;
+                int len = exactInstructionLength(op, bc, pc, code.codeOffset);
+                if (len <= 0 || pc + len > end) break;
+                if (op == OP_GETSTATIC) {
+                    int ref = u2(bc, pc + 1);
+                    if (ref == charRef) {
+                        bc[pc] = (byte) OP_BIPUSH;
+                        bc[pc + 1] = (byte) '/';
+                        bc[pc + 2] = (byte) OP_NOP;
+                        rewritten++;
+                    } else if (ref == stringRef) {
+                        if (slash < 0) slash = cf.findOrAddString("/");
+                        if (slash < 0) { pc += len; continue; }  // constant pool full
+                        bc[pc] = (byte) OP_LDC_W;
+                        writeU2(bc, pc + 1, slash);
+                        rewritten++;
+                    }
+                }
+                pc += len;
+            }
+        }
+        return rewritten;
+    }
+
+    /** The exact length of the instruction at pc, wide and the two
+     *  switches included (instructionLength above gives up on those), so a
+     *  scan of a whole method never lands inside an operand. codeStart is
+     *  the offset of the method's first instruction (switch padding counts
+     *  from it). -1 on an opcode that cannot appear. */
+    private static int exactInstructionLength(int op, byte[] bc, int pc, int codeStart) {
+        switch (op) {
+            case 0xC4: {                                                  // wide
+                int next = bc[pc + 1] & 0xFF;
+                return next == 0x84 ? 6 : 4;                              // wide iinc / wide load-store-ret
+            }
+            case 0xAA: {                                                  // tableswitch
+                int p = pc + 1 + ((4 - ((pc + 1 - codeStart) & 3)) & 3);
+                int low = u4(bc, p + 4), high = u4(bc, p + 8);
+                long n = (long) high - low + 1;
+                if (n < 0 || n > 65535) return -1;
+                return (p - pc) + 12 + (int) n * 4;
+            }
+            case 0xAB: {                                                  // lookupswitch
+                int p = pc + 1 + ((4 - ((pc + 1 - codeStart) & 3)) & 3);
+                int pairs = u4(bc, p + 4);
+                if (pairs < 0 || pairs > 65535) return -1;
+                return (p - pc) + 8 + pairs * 8;
+            }
+            case 0x11:                                                    // sipush
+                return 3;
+            default:
+                if (op > 0xC9) return -1;                                 // reserved, or not in class files
+                return instructionLength(op, bc, pc);
+        }
+    }
+
+    // -----------------------------------------------------------------
     // Pattern G -- Java-side /proc/* constant-pool string redirect
     // -----------------------------------------------------------------
     //
@@ -1480,6 +1653,7 @@ public final class ClassFileRewriter {
         final int    classAccessFlags;
         final List<Integer> interfaces = new ArrayList<>();  // CP indices
         final List<MethodEntry> methods = new ArrayList<>();
+        final List<Integer> methodOffsets = new ArrayList<>();  // each method_info's offset in raw
 
         ClassFile(byte[] r) {
             this.raw = r;
@@ -1534,6 +1708,7 @@ public final class ClassFileRewriter {
             }
             int methodsCount = u2(r, off); off += 2;
             for (int m = 0; m < methodsCount; ++m) {
+                methodOffsets.add(off);
                 methods.add(parseMethod(r, off));
                 off = skipFieldOrMethod(r, off);
             }
@@ -1618,6 +1793,43 @@ public final class ClassFileRewriter {
             return newIdx;
         }
 
+        /** The CP index of a CONSTANT_String holding `value` (ASCII, at most
+         *  127 chars): an existing one, else a new String entry (with a new
+         *  UTF8 entry unless one exists). -1 when the constant pool is full. */
+        int findOrAddString(String value) {
+            int utf = -1;
+            for (int i = 1; i < cpEntries.size(); ++i) {
+                CpEntry e = cpEntries.get(i);
+                if (e == null || e.added) continue;
+                if (e.tag == CP_STRING && value.equals(utf8(u2(raw, e.offset + 1)))) return i;
+                if (e.tag == CP_UTF8 && utf < 0 && value.equals(utf8(i))) utf = i;
+            }
+            if (cpEntries.size() + 2 > 0xFFFF) return -1;
+            if (utf < 0) {
+                byte[] b = value.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+                byte[] entry = new byte[3 + b.length];
+                entry[0] = (byte) CP_UTF8;
+                writeU2(entry, 1, b.length);
+                System.arraycopy(b, 0, entry, 3, b.length);
+                utf = appendRaw(CP_UTF8, entry);
+            }
+            byte[] str = new byte[3];
+            str[0] = (byte) CP_STRING;
+            writeU2(str, 1, utf);
+            return appendRaw(CP_STRING, str);
+        }
+
+        private int appendRaw(int tag, byte[] bytes) {
+            int newIdx = cpEntries.size();
+            CpEntry e = new CpEntry(tag, -1, bytes.length);
+            e.added = true;
+            e.addedRaw = bytes;
+            cpEntries.add(e);
+            cpAdded.add(e);
+            cpCount++;
+            return newIdx;
+        }
+
         /** Serialize the (possibly-modified) class file back to bytes.
          *  The original `raw` is split at cpEndOriginal and rebuilt
          *  with:
@@ -1642,6 +1854,11 @@ public final class ClassFileRewriter {
             dst += cpEndOriginal - cpStart;
             // Added CP entries.
             for (CpEntry e : cpAdded) {
+                if (e.addedRaw != null) {
+                    System.arraycopy(e.addedRaw, 0, out, dst, e.addedRaw.length);
+                    dst += e.addedRaw.length;
+                    continue;
+                }
                 out[dst++] = (byte) e.tag;
                 writeU2(out, dst, e.addedClassIdx); dst += 2;
                 writeU2(out, dst, e.addedNtIdx);    dst += 2;
@@ -1659,6 +1876,7 @@ public final class ClassFileRewriter {
         boolean added;
         int addedClassIdx;
         int addedNtIdx;
+        byte[] addedRaw;   // an added entry's whole bytes (UTF8, String); null for a Methodref
         CpEntry(int tag, int offset, int size) {
             this.tag = tag; this.offset = offset; this.size = size;
         }

@@ -106,6 +106,17 @@ jobs:
         run: |
           export JAVA_HOME="$(cygpath -u "$JAVA_HOME")"
           windows/scripts/stage_runtime.sh build runtime
+      - name: Run the File.separator rewrite test
+        run: |
+          # Guest code reads Android's '/' from java.io.File.separator(Char);
+          # the JDK's own classes keep the backslash. Then again with the
+          # switch off.
+          export JAVA_HOME="$(cygpath -u "$JAVA_HOME")"
+          "$JAVA_HOME/bin/javac" -cp runtime/lib/macapk-loader.jar -d build/sep-test \
+            windows/test/java/FileSeparatorRewriteTest.java
+          cp="$(cygpath -w runtime/lib/macapk-loader.jar);$(cygpath -w build/sep-test)"
+          "$JAVA_HOME/bin/java" -cp "$cp" FileSeparatorRewriteTest
+          MACAPK_ANDROID_FILE_SEPARATOR=0 "$JAVA_HOME/bin/java" -cp "$cp" FileSeparatorRewriteTest off
       - name: Run the GL test
         run: |
           # It needs ANGLE next to it, which staging just put in runtime/bin.
