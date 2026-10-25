@@ -107,6 +107,15 @@ jobs:
         run: |
           export JAVA_HOME="$(cygpath -u "$JAVA_HOME")"
           windows/scripts/stage_runtime.sh build runtime
+      - name: Run the real-JVM test on the runtime's Bitmap
+        run: |
+          # libjnigraphics (AndroidBitmap_*) on android.graphics.Bitmap, which
+          # the staged android-framework.jar provides; the run before staging
+          # skips that check.
+          export PATH="$(cygpath -u "$JAVA_HOME")/bin/server:$(cygpath -u "$JAVA_HOME")/bin:$PATH"
+          cp="guest/e2e/classes;$(cygpath -w runtime/lib/android-framework.jar);$(cygpath -w runtime/lib/macapk-loader.jar)"
+          ./build/winapk-jvm-run.exe guest/e2e/libwinapk_jni_guest.so "$cp" | tee jvm-bitmap.log
+          grep -q "\[PASS\] AndroidBitmap" jvm-bitmap.log
       - name: Run the File.separator rewrite test
         run: |
           # Guest code reads Android's '/' from java.io.File.separator(Char);

@@ -82,8 +82,20 @@ endif()
 # JDK-free, so the elf-loader and thunk targets build without a JDK.
 set(WINAPK_JNI_INCLUDE "" CACHE PATH "JDK include dir (contains jni.h and win32/jni_md.h)")
 if(WINAPK_JNI_INCLUDE)
-  add_library(winapk_jni STATIC src/guest_jni.cpp src/jni_variadic.cpp src/jni_bind.cpp)
+  # libjnigraphics (src/jnigraphics.cpp) is upstream's AndroidBitmap section of
+  # its bionic_shim.cpp, cut out at build time like the GL bindings below.
+  set(WINAPK_BITMAP_UPSTREAM ${CMAKE_BINARY_DIR}/jnigraphics/bitmap_upstream.inc)
+  add_custom_command(
+    OUTPUT ${WINAPK_BITMAP_UPSTREAM}
+    COMMAND ${CMAKE_COMMAND} -DUPSTREAM=${CMAKE_CURRENT_SOURCE_DIR}/../runtime/translator/src/bionic_shim.cpp
+            -DOUT=${WINAPK_BITMAP_UPSTREAM} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/extract_bitmap.cmake
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../runtime/translator/src/bionic_shim.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/cmake/extract_bitmap.cmake
+    COMMENT "Extracting upstream's libjnigraphics")
+  add_library(winapk_jni STATIC src/guest_jni.cpp src/jni_variadic.cpp src/jni_bind.cpp src/jnigraphics.cpp
+                                ${WINAPK_BITMAP_UPSTREAM})
   target_include_directories(winapk_jni PUBLIC include "${WINAPK_JNI_INCLUDE}" "${WINAPK_JNI_INCLUDE}/win32")
+  target_include_directories(winapk_jni PRIVATE ${CMAKE_BINARY_DIR}/jnigraphics)
   target_link_libraries(winapk_jni PUBLIC winapk_loader)
 
   add_executable(winapk-jni-test test/jni_wrapper_test.cpp)
