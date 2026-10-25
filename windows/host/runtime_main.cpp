@@ -24,6 +24,7 @@
 
 #include "guest_libs.h"
 #include "host_natives.h"
+#include "win32_window.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -234,23 +235,20 @@ struct BootArgs {
 };
 
 // The display density, as upstream derives it from the Mac screen's point
-// scale (Retina 2x = 320 dpi): Windows' scale for the main monitor x 160, so
-// 100% is 160 (mdpi), 150% is 240 (hdpi), 200% is 320 (xhdpi). The app then
-// draws at exactly the window's pixel size and nothing is stretched or shrunk.
-// Headless runs (tests, CI) keep upstream's 320 so their frames stay 720x1280;
-// WINAPK_DENSITY (a dpi) overrides both.
+// scale (Retina 2x = 320 dpi): the Windows scale of the monitor the app opens
+// on x 160, so 100% is 160 (mdpi), 150% is 240 (hdpi), 200% is 320 (xhdpi).
+// When the whole window would not fit that monitor's work area, the scale is
+// lowered until it does (win32_window.h, window_plan): the app keeps its dp
+// size and draws at exactly the window's pixel size, so nothing is stretched
+// or shrunk. Headless runs (tests, CI) keep upstream's 320 so their frames
+// stay 720x1280; WINAPK_DENSITY (a dpi) overrides both.
 int display_density_dpi() {
     const std::wstring forced = env_var(L"WINAPK_DENSITY");
     if (!forced.empty()) return _wtoi(forced.c_str());
     if (!env_var(L"WINAPK_HEADLESS").empty()) return 320;
-    using DpiAwareFn = BOOL(WINAPI*)(HANDLE);
-    using SystemDpiFn = UINT(WINAPI*)();
-    HMODULE user32 = GetModuleHandleW(L"user32.dll");
-    auto aware = reinterpret_cast<DpiAwareFn>(GetProcAddress(user32, "SetProcessDpiAwarenessContext"));
-    auto system_dpi = reinterpret_cast<SystemDpiFn>(GetProcAddress(user32, "GetDpiForSystem"));
-    if (aware) aware(reinterpret_cast<HANDLE>(-4));  // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
-    const UINT dpi = system_dpi ? system_dpi() : 96;
-    return std::clamp(static_cast<int>(dpi * 160 / 96), 120, 640);
+    int w = 0, h = 0;
+    winapk::host::launch_phone_size(&w, &h);
+    return winapk::host::window_density_dpi(winapk::host::window_plan(w, h));
 }
 
 std::vector<std::string> jvm_options(const BootArgs& b) {

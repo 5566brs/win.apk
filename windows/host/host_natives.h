@@ -53,6 +53,10 @@ HostMethods native_gl_methods();        // gl/gl_bridges.cpp
 // launcher icon (icon.png) that becomes the window's icon. native_cocoa.cpp.
 void set_app_dir(const std::wstring& dir);
 
+// The phone the app starts with, in dp: WINAPK_PHONE_SIZE, else 360x800.
+// native_cocoa.cpp.
+void launch_phone_size(int* w, int* h);
+
 struct NativeStats {
     int classes = 0;        // host classes found
     int implemented = 0;    // methods bound to a Windows implementation

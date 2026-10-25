@@ -115,11 +115,18 @@ from Java (`GLSurfaceView`, libGDX) on ANGLE, and so do apps that draw with
 OpenGL ES from their own native code through a SurfaceView (SDL games);
 `NativeActivity` apps and native audio (OpenSL ES, AAudio) are not there yet. App data goes to `%LOCALAPPDATA%\Win.apk`.
 
-The app sees a 360x800 dp phone, the most common phone screen, made shorter
-(down to 360x640) when the window would not fit the screen's work area.
-`WINAPK_PHONE_SIZE=412x915` sets another size, in dp.
+The app sees a 360x800 dp phone, the most common phone screen.
+`WINAPK_PHONE_SIZE=412x915` sets another size, in dp. The window shows the
+phone at the monitor's scale. When the whole window, title bar included, would
+not fit the monitor's work area (the screen without the taskbar), the app gets
+a lower density instead, so it keeps its dp size and still draws at the
+window's own pixel size. The window is fitted again when it moves to another
+monitor or the taskbar changes. `WINAPK_DENSITY` (a dpi) overrides the density.
 
-For tests, `WINAPK_HEADLESS=1` runs without a window,
+For tests, `WINAPK_TEST_WORKAREA=1366x728` stands in for the work area, in
+pixels (`1366x728-0+0` puts it at the top right of the real one;
+`@file` reads the value from a file at every fit),
+`WINAPK_HEADLESS=1` runs without a window,
 `WINAPK_HEADLESS_FRAME=frame.bmp` saves the last frame the app drew, and
 `WINAPK_HEADLESS_EXIT_AFTER_FRAMES=30` exits that many display frames after the
 first one the app presents (an idle app counts too). On
