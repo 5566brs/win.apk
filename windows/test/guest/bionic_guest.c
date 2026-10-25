@@ -30,6 +30,8 @@ int atoi(const char*);
 void* malloc(size_t);
 void free(void*);
 void* memset(void*, int, size_t);
+void* memcpy(void*, const void*, size_t);
+int memcmp(const void*, const void*, size_t);
 int* __errno(void);
 char* strerror(int);
 int isdigit(int);
@@ -494,6 +496,228 @@ static void test_files(const char* dir) {
     if (nfd >= 0) close(nfd);
 }
 
+// ---- zlib (libz.so) ---------------------------------------------------------------
+// Android's z_stream: uLong is 64 bits (LP64), so it is 112 bytes where Windows
+// zlib's is 88 (see src/bionic/zlib.cpp). The constants are zlib.h's: Z_OK 0,
+// Z_STREAM_END 1, Z_STREAM_ERROR -2, Z_DATA_ERROR -3, Z_BUF_ERROR -5,
+// Z_VERSION_ERROR -6; Z_NO_FLUSH 0, Z_FINISH 4; Z_DEFLATED 8.
+typedef struct {
+    const unsigned char* next_in;
+    unsigned avail_in;
+    unsigned long total_in;
+    unsigned char* next_out;
+    unsigned avail_out;
+    unsigned long total_out;
+    const char* msg;
+    void* state;
+    void* (*zalloc)(void*, unsigned, unsigned);
+    void (*zfree)(void*, void*);
+    void* opaque;
+    int data_type;
+    unsigned long adler;
+    unsigned long reserved;
+} z_stream;
+const char* zlibVersion(void);
+unsigned long zlibCompileFlags(void);
+int deflateInit2_(z_stream*, int, int, int, int, int, const char*, int);
+int deflate(z_stream*, int);
+int deflateEnd(z_stream*);
+int inflateInit2_(z_stream*, int, const char*, int);
+int inflate(z_stream*, int);
+int inflateCopy(z_stream*, z_stream*);
+int inflateEnd(z_stream*);
+unsigned long crc32(unsigned long, const unsigned char*, unsigned);
+unsigned long adler32(unsigned long, const unsigned char*, unsigned);
+unsigned long crc32_combine(unsigned long, unsigned long, long);
+unsigned long adler32_combine(unsigned long, unsigned long, long);
+unsigned long compressBound(unsigned long);
+int compress2(unsigned char*, unsigned long*, const unsigned char*, unsigned long, int);
+int uncompress(unsigned char*, unsigned long*, const unsigned char*, unsigned long);
+// gzFile's public part, which zlib.h's gzgetc() macro reads in place.
+struct gzFile_s { unsigned have; unsigned char* next; long pos; };
+typedef struct gzFile_s* gzFile;
+#define GZGETC(g) ((g)->have ? ((g)->have--, (g)->pos++, *((g)->next)++) : gzgetc(g))
+gzFile gzopen(const char*, const char*);
+int gzwrite(gzFile, const void*, unsigned);
+int gzprintf(gzFile, const char*, ...);
+int gzread(gzFile, void*, unsigned);
+int gzgetc(gzFile);
+long gztell(gzFile);
+int gzclose(gzFile);
+
+static int g_z_allocs, g_z_frees;
+static void* z_alloc(void* opaque, unsigned items, unsigned size) {
+    if (opaque == &g_z_allocs) ++g_z_allocs;
+    return malloc((size_t)items * size);
+}
+static void z_free(void* opaque, void* p) {
+    if (opaque == &g_z_allocs) ++g_z_frees;
+    free(p);
+}
+
+static void test_zlib(const char* dir) {
+    static const unsigned char nine[] = "123456789";
+    check("crc32(\"123456789\") is CBF43926", crc32(0, nine, 9) == 0xcbf43926UL, 0);
+    check("adler32(\"123456789\") is 091E01DE", adler32(1, nine, 9) == 0x091e01deUL, 0);
+    check("crc32_combine and adler32_combine (64-bit z_off_t)",
+          crc32_combine(crc32(0, nine, 4), crc32(0, nine + 4, 5), 5) == 0xcbf43926UL &&
+              adler32_combine(adler32(1, nine, 4), adler32(1, nine + 4, 5), 5) == 0x091e01deUL, 0);
+    check("zlibVersion is 1.x", zlibVersion()[0] == '1', zlibVersion());
+    const unsigned long flags = zlibCompileFlags();
+    check("zlibCompileFlags: 64-bit uLong and z_off_t", ((flags >> 2) & 3) == 2 && ((flags >> 6) & 3) == 2, 0);
+
+    enum { N = 256 * 1024 };
+    unsigned char* data = malloc(N);
+    unsigned char* packed = malloc(compressBound(N));
+    unsigned char* back = malloc(N);
+    unsigned char* back2 = malloc(N);
+    for (int i = 0; i < N; ++i) data[i] = (unsigned char)("Win.apk zlib "[i % 13] + (i / 4096) % 7);
+
+    // gzip, in 1000-byte output slices, through the guest's own allocator.
+    z_stream s;
+    memset(&s, 0, sizeof s);
+    s.zalloc = z_alloc;
+    s.zfree = z_free;
+    s.opaque = &g_z_allocs;
+    int r = deflateInit2_(&s, 9, 8, 15 + 16, 8, 0, "1.3.1", (int)sizeof s);
+    check("deflateInit2_ (gzip) with a 112-byte z_stream", r == 0 && s.state != 0, 0);
+    s.next_in = data;
+    s.avail_in = N;
+    s.next_out = packed;
+    while (r == 0 && s.next_out + 1000 <= packed + N) {
+        s.avail_out = 1000;
+        r = deflate(&s, 4);
+    }
+    const unsigned long packed_len = s.total_out;
+    check("deflate in slices ends with Z_STREAM_END",
+          r == 1 && s.total_in == N && packed_len == (unsigned long)(s.next_out - packed) && packed_len < N / 10, 0);
+    check("deflate's adler is the data's CRC-32 (gzip)", s.adler == crc32(0, data, N), 0);
+    r = deflateEnd(&s);
+    check("deflateEnd; the guest's zalloc/zfree got its opaque",
+          r == 0 && s.state == 0 && g_z_allocs > 0 && g_z_allocs == g_z_frees, 0);
+
+    // What Telegram's tgnet does with a gzip_packed reply: header auto-detect
+    // (15 + 32), one inflate(Z_NO_FLUSH) into a buffer that fits.
+    memset(&s, 0, sizeof s);
+    r = inflateInit2_(&s, 15 + 32, "1.2.13", (int)sizeof s);
+    s.next_in = packed;
+    s.avail_in = (unsigned)packed_len;
+    s.next_out = back;
+    s.avail_out = N;
+    if (r == 0) r = inflate(&s, 0);
+    check("inflateInit2_ + inflate: Z_STREAM_END and the data",
+          r == 1 && s.total_out == N && memcmp(back, data, N) == 0, 0);
+    check("inflate's totals and CRC-32", s.total_in == packed_len && s.adler == crc32(0, data, N), 0);
+    inflateEnd(&s);
+
+    // Many calls on one stream: 17 bytes in, 511 out at a time.
+    memset(&s, 0, sizeof s);
+    memset(back, 0, N);
+    r = inflateInit2_(&s, 15 + 16, "1.3", (int)sizeof s);
+    s.next_in = packed;
+    s.next_out = back;
+    while (r == 0) {
+        s.avail_in = (unsigned)(packed + packed_len - s.next_in);
+        if (s.avail_in > 17) s.avail_in = 17;
+        s.avail_out = (unsigned)(back + N - s.next_out);
+        if (s.avail_out > 511) s.avail_out = 511;
+        r = inflate(&s, 0);
+    }
+    check("inflate in 17/511-byte slices", r == 1 && s.total_out == N && memcmp(back, data, N) == 0, 0);
+    inflateEnd(&s);
+
+    // The totals are 64 bits: counters already past 4 GiB keep counting.
+    memset(&s, 0, sizeof s);
+    r = inflateInit2_(&s, 15 + 16, "1.3.1", (int)sizeof s);
+    s.total_in = 0x1fffffff0UL;
+    s.total_out = 0x2fffffff8UL;
+    s.next_in = packed;
+    s.avail_in = (unsigned)packed_len;
+    s.next_out = back;
+    s.avail_out = N;
+    if (r == 0) r = inflate(&s, 4);
+    check("total_in/total_out count past 4 GiB",
+          r == 1 && s.total_in == 0x1fffffff0UL + packed_len && s.total_out == 0x2fffffff8UL + N, 0);
+    inflateEnd(&s);
+
+    // inflateCopy halfway: both streams finish on their own, and the copy's
+    // state goes through the guest's allocator too.
+    g_z_allocs = g_z_frees = 0;
+    memset(&s, 0, sizeof s);
+    memset(back, 0, N);
+    s.zalloc = z_alloc;
+    s.zfree = z_free;
+    s.opaque = &g_z_allocs;
+    r = inflateInit2_(&s, 15 + 16, "1.3.1", (int)sizeof s);
+    s.next_in = packed;
+    s.avail_in = (unsigned)(packed_len / 2);
+    s.next_out = back;
+    s.avail_out = N;
+    if (r == 0) r = inflate(&s, 0);
+    z_stream t;
+    const int copied = r == 0 && inflateCopy(&t, &s) == 0;
+    const unsigned long half = s.total_out;
+    memcpy(back2, back, half);
+    t.next_out = back2 + half;
+    s.avail_in = t.avail_in = (unsigned)(packed_len - packed_len / 2);
+    const int rs = inflate(&s, 4), rt = copied ? inflate(&t, 4) : -99;
+    check("inflateCopy mid-stream; both copies finish",
+          copied && t.state != s.state && rs == 1 && rt == 1 && t.total_out == N && memcmp(back, data, N) == 0 &&
+              memcmp(back2, data, N) == 0, 0);
+    inflateEnd(&s);
+    if (copied) inflateEnd(&t);
+    check("the copy's allocations are freed too", g_z_allocs > 1 && g_z_allocs == g_z_frees, 0);
+
+    // Wrong stream size (Windows zlib's 88), corrupt input, an ended stream.
+    memset(&s, 0, sizeof s);
+    check("inflateInit2_ refuses an 88-byte z_stream", inflateInit2_(&s, 15, "1.3.1", 88) == -6, 0);
+    r = inflateInit2_(&s, 15, "1.3.1", (int)sizeof s);
+    s.next_in = data;
+    s.avail_in = 64;
+    s.next_out = back;
+    s.avail_out = N;
+    if (r == 0) r = inflate(&s, 0);
+    check("inflate of garbage: Z_DATA_ERROR with a message", r == -3 && s.msg != 0, s.msg);
+    inflateEnd(&s);
+    check("inflate on an ended stream: Z_STREAM_ERROR", inflate(&s, 0) == -2 && s.state == 0, 0);
+
+    // One-call forms, with 64-bit lengths.
+    unsigned long plen = compressBound(N), blen = N;
+    r = compress2(packed, &plen, data, N, 6);
+    memset(back, 0, N);
+    const int ru = uncompress(back, &blen, packed, plen);
+    check("compress2 + uncompress", r == 0 && ru == 0 && blen == N && plen < N / 10 && memcmp(back, data, N) == 0, 0);
+    blen = 100;
+    check("uncompress into a short buffer: Z_BUF_ERROR", uncompress(back, &blen, packed, plen) == -5 && blen == 100, 0);
+
+    // gzip files on an Android path, gzprintf with guest varargs, and the
+    // gzgetc() macro reading the host's gzFile.
+    gzFile f = gzopen("/zlib_test.gz", "wb");
+    const int w = f ? gzwrite(f, data, 5000) : 0;
+    const int p = f ? gzprintf(f, "|%d|%s|%.2f|", 42, "gz", 2.5) : 0;
+    const int c = f ? gzclose(f) : -1;
+    check("gzopen/gzwrite/gzprintf/gzclose", f && w == 5000 && p == 12 && c == 0, 0);
+    memset(back, 0, 6000);
+    f = gzopen("/zlib_test.gz", "rb");
+    const int c0 = f ? gzgetc(f) : -1;
+    const int c1 = f ? GZGETC(f) : -1;
+    const long at = f ? gztell(f) : -1;
+    const int n = f ? gzread(f, back + 2, 6000) : -1;
+    if (f) gzclose(f);
+    check("gzgetc, the gzgetc() macro and gztell", c0 == data[0] && c1 == data[1] && at == 2, 0);
+    check("gzread reads it back",
+          n == 5010 && memcmp(back + 2, data + 2, 4998) == 0 && memcmp(back + 5000, "|42|gz|2.50|", 12) == 0, 0);
+    char path[512];
+    snprintf(path, sizeof path, "%s/zlib_test.gz", dir);
+    struct stat st;
+    check("the .gz file is under the android root", stat(path, &st) == 0 && st.size > 0 && st.size < 5000, 0);
+    unlink("/zlib_test.gz");
+    free(data);
+    free(packed);
+    free(back);
+    free(back2);
+}
+
 // ---- the rest -------------------------------------------------------------------------
 static void test_misc(void) {
     struct timespec a, b2;
@@ -536,6 +760,7 @@ EXPORT int bionic_test(const char* dir) {
     test_sockets();
     test_looper();
     test_files(dir);
+    test_zlib(dir);
     test_misc();
     return failures;
 }

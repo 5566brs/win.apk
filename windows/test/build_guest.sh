@@ -40,7 +40,7 @@ COMMON=(
 LINK="$OUT/link"
 STUBS="$OUT/link-stubs"
 mkdir -p "$LINK" "$STUBS"
-for lib in libc libdl liblog; do
+for lib in libc libdl liblog libz; do
     "$CC" "${COMMON[@]}" -Wl,-soname,$lib.so -o "$STUBS/$lib.so" -x c /dev/null
 done
 link_lib() {  # link_lib <part> <name> [linker args...]
@@ -58,9 +58,10 @@ link_lib MID libwinapk_link_mid -L"$LINK" -L"$STUBS" -lwinapk_link_base -llog
 link_lib ROOT libwinapk_link_root -L"$LINK" -L"$STUBS" -lwinapk_link_mid -lc -ldl
 
 # The Bionic shim's guest-side test (winapk-bionic-test). Real ELF TLS, as an
-# NDK build for minSdk 29 or later uses.
+# NDK build for minSdk 29 or later uses. Linked against libz.so, as NDK code
+# that uses zlib is, so the system library is a DT_NEEDED entry.
 "$CC" "${COMMON[@]}" -fno-emulated-tls -Wl,-soname,libwinapk_bionic_guest.so \
-    -o "$OUT/libwinapk_bionic_guest.so" "$HERE/guest/bionic_guest.c"
+    -o "$OUT/libwinapk_bionic_guest.so" "$HERE/guest/bionic_guest.c" -L"$STUBS" -Wl,--no-as-needed -lz
 
 echo "[build_guest] $OUT/libwinapk_poc_guest.so"
 echo "[build_guest] $OUT/libwinapk_poc_guest_packed.so"

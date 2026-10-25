@@ -46,6 +46,7 @@ jobs:
             clang:p
             cmake:p
             ninja:p
+            zlib:p
       - uses: actions/cache@v4
         with:
           path: thirdparty/framework-res

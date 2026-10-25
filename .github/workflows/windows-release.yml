@@ -37,6 +37,7 @@ jobs:
             clang:p
             cmake:p
             ninja:p
+            zlib:p
       - name: Build
         run: |
           cmake -S windows -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++ \

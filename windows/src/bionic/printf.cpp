@@ -383,6 +383,8 @@ WINAPK_GUEST_ABI int h_android_log_print(int prio, const char* tag, const char* 
 
 }  // namespace
 
+std::string format_va(const char* fmt, SysVVaList* va) { return format_string(fmt, va); }
+
 ShimTable printf_symbols() {
     static const std::vector<ShimSymbol> symbols = [] {
         auto variadic = [](int named, auto handler) {

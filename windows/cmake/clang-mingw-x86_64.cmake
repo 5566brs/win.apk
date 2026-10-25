@@ -1,5 +1,6 @@
 # Cross-compile Win.apk for Windows x64 from Linux with clang + the mingw-w64
-# headers and libraries (Debian/Ubuntu: apt install clang lld mingw-w64).
+# headers and libraries (Debian/Ubuntu: apt install clang lld mingw-w64
+# libz-mingw-w64-dev).
 #
 #   cmake -S windows -B windows/build -G Ninja \
 #         -DCMAKE_TOOLCHAIN_FILE=windows/cmake/clang-mingw-x86_64.cmake
