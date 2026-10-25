@@ -2,6 +2,7 @@
 
 #include "win32_window.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -66,6 +67,8 @@ const uint32_t* composed_frame() {
 }
 COLORREF g_background = RGB(255, 255, 255);  // until the first frame
 
+constexpr DWORD kStyle = WS_OVERLAPPEDWINDOW;
+
 UINT window_dpi(HWND hwnd) {
     using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
     static auto fn = reinterpret_cast<GetDpiForWindowFn>(
@@ -77,12 +80,181 @@ UINT window_dpi(HWND hwnd) {
     return dpi > 0 ? static_cast<UINT>(dpi) : 96;
 }
 
-// The window size whose client area shows the phone at the monitor's scale.
-SIZE outer_size(HWND hwnd, DWORD style) {
-    const UINT dpi = window_dpi(hwnd);
-    RECT r{0, 0, MulDiv(g_phone_w, dpi, 96), MulDiv(g_phone_h, dpi, 96)};
-    AdjustWindowRectEx(&r, style, FALSE, 0);
+// ---- fitting the window to the work area ----------------------------------
+//
+// The window shows the phone at a scale in pixels per dp. At launch that is
+// the monitor's own scale (its DPI / 96), unless the whole window -- title bar
+// and borders included, plus a small margin -- would not fit the monitor's
+// work area (the screen without the taskbar). Then it is the largest scale at
+// which it fits, the same for width and height. The runtime derives the app's
+// density from that same scale (window_plan), so the app draws its frames at
+// exactly the window's pixel size: a small or scaled screen gets a lower
+// density, not a shrunk bitmap, and the app keeps its dp layout (360x800 dp
+// stays 360x800 dp).
+//
+// The density is fixed for the life of the process. When the window later
+// moves to another monitor, the work area changes (the taskbar moved or grew)
+// or the app turns the phone, the window is fitted again: it keeps its launch
+// size in physical terms, made smaller when that no longer fits, and the
+// frames are resampled to it. The next start picks the density that fits.
+
+struct Plan {
+    bool set = false;
+    HMONITOR monitor = nullptr;
+    UINT dpi = 96;
+    float scale = 1.0f;  // px per dp at launch: the monitor's scale, or less to fit
+};
+Plan g_plan;
+// px per dp the window shows the phone at on the launch monitor: the frames'
+// own scale when the density came from the plan (1:1, nothing resampled),
+// else (WINAPK_DENSITY) the plan's scale.
+float g_base_scale = 1.0f;
+float g_surface_scale = 1.0f;  // px per dp of the frames (the app's density / 160)
+HMONITOR g_fit_monitor = nullptr;  // the monitor the window was last fitted for
+bool g_in_size_move = false;
+bool g_refit_pending = false;  // a fit came while minimized or maximized
+
+UINT monitor_dpi(HMONITOR mon) {
+    using GetDpiForMonitorFn = HRESULT(WINAPI*)(HMONITOR, int, UINT*, UINT*);
+    static auto fn = [] {
+        HMODULE shcore = LoadLibraryW(L"shcore.dll");  // Windows 8.1 and later
+        return shcore ? reinterpret_cast<GetDpiForMonitorFn>(GetProcAddress(shcore, "GetDpiForMonitor")) : nullptr;
+    }();
+    UINT x = 0, y = 0;
+    if (fn && mon && SUCCEEDED(fn(mon, 0 /* MDT_EFFECTIVE_DPI */, &x, &y)) && x > 0) return x;
+    return window_dpi(nullptr);
+}
+
+// The window rect around a client rect at `dpi` (Windows 10 1607 and later;
+// before that, the system DPI's frame).
+void adjust_for_dpi(RECT* r, UINT dpi) {
+    using AdjustFn = BOOL(WINAPI*)(RECT*, DWORD, BOOL, DWORD, UINT);
+    static auto fn = reinterpret_cast<AdjustFn>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"), "AdjustWindowRectExForDpi"));
+    if (!fn || !fn(r, kStyle, FALSE, 0, dpi)) AdjustWindowRectEx(r, kStyle, FALSE, 0);
+}
+
+int margin_px(UINT dpi) { return MulDiv(4, static_cast<int>(dpi), 96); }
+
+// "<w>x<h>", optionally followed by "+<x>+<y>" (from the left and top edge of
+// the real work area) or "-<x>-<y>" (from the right and bottom edge).
+bool parse_geometry(const wchar_t* s, const RECT& real, RECT* out) {
+    int w = 0, h = 0, n = 0;
+    if (swscanf(s, L"%dx%d%n", &w, &h, &n) < 2 || w < 100 || h < 100) return false;
+    s += n;
+    int offs[2] = {0, 0};
+    bool from_end[2] = {false, false};
+    for (int i = 0; i < 2 && (*s == L'+' || *s == L'-'); ++i) {
+        from_end[i] = *s == L'-';
+        int v = 0, m = 0;
+        if (swscanf(s + 1, L"%d%n", &v, &m) < 1) return false;
+        offs[i] = v;
+        s += 1 + m;
+    }
+    const LONG x = from_end[0] ? real.right - offs[0] - w : real.left + offs[0];
+    const LONG y = from_end[1] ? real.bottom - offs[1] - h : real.top + offs[1];
+    *out = RECT{x, y, x + w, y + h};
+    return true;
+}
+
+// WINAPK_TEST_WORKAREA=<w>x<h>[+<x>+<y> | -<x>-<y>], in pixels, stands in for
+// every monitor's work area, so that fitting can be tried on a big screen.
+// "@<file>" reads that text from the file at every fit, so a test can change
+// the work area while the app runs (then send WM_SETTINGCHANGE).
+bool test_work_area(const RECT& real, RECT* out) {
+    wchar_t buf[1024];
+    const DWORD n = GetEnvironmentVariableW(L"WINAPK_TEST_WORKAREA", buf, 1024);
+    if (n == 0 || n >= 1024) return false;
+    if (buf[0] != L'@') return parse_geometry(buf, real, out);
+    char text[128] = {};
+    HANDLE f = CreateFileW(buf + 1, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                           OPEN_EXISTING, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    DWORD got = 0;
+    ReadFile(f, text, sizeof(text) - 1, &got, nullptr);
+    CloseHandle(f);
+    wchar_t wtext[128] = {};
+    for (DWORD i = 0; i < got; ++i) wtext[i] = static_cast<unsigned char>(text[i]);
+    return parse_geometry(wtext, real, out);
+}
+
+RECT work_area(HMONITOR mon) {
+    RECT wa{};
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    if (mon && GetMonitorInfoW(mon, &mi)) wa = mi.rcWork;
+    else SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
+    RECT test;
+    if (test_work_area(wa, &test)) wa = test;
+    return wa;
+}
+
+// The largest px per dp at which a phone of w x h dp, with the window's frame
+// at `dpi` and the margin on every side, fits in `wa`.
+float fit_scale(const RECT& wa, UINT dpi, int w, int h) {
+    RECT f{0, 0, 0, 0};
+    adjust_for_dpi(&f, dpi);
+    const int m = margin_px(dpi);
+    const float aw = static_cast<float>((wa.right - wa.left) - (f.right - f.left) - 2 * m);
+    const float ah = static_cast<float>((wa.bottom - wa.top) - (f.bottom - f.top) - 2 * m);
+    if (w <= 0 || h <= 0 || aw <= 0 || ah <= 0) return 0.25f;
+    return std::max(0.25f, std::min(aw / static_cast<float>(w), ah / static_cast<float>(h)));
+}
+
+int client_px(int dp, float scale) { return static_cast<int>(static_cast<float>(dp) * scale + 0.5f); }
+
+// What the window shows the phone at on a monitor at `dpi` with work area
+// `wa`: its launch size in physical terms, or less to fit.
+float target_scale(UINT dpi, const RECT& wa) {
+    const float keep = g_base_scale * static_cast<float>(dpi) / static_cast<float>(g_plan.dpi ? g_plan.dpi : 96);
+    return std::min(keep, fit_scale(wa, dpi, g_phone_w, g_phone_h));
+}
+
+// The window size whose client area shows the phone at `scale`.
+SIZE outer_size(UINT dpi, float scale) {
+    RECT r{0, 0, client_px(g_phone_w, scale), client_px(g_phone_h, scale)};
+    adjust_for_dpi(&r, dpi);
     return {r.right - r.left, r.bottom - r.top};
+}
+
+// Sizes the window for monitor `mon` at `dpi`, at `at` (its current place when
+// null); with `keep_inside`, moved as needed to lie wholly in the work area.
+void fit_window(HWND hwnd, HMONITOR mon, UINT dpi, const RECT* at, bool keep_inside) {
+    if (IsIconic(hwnd) || IsZoomed(hwnd)) {
+        g_refit_pending = true;
+        return;
+    }
+    g_refit_pending = false;
+    g_fit_monitor = mon;
+    const RECT wa = work_area(mon);
+    const float scale = target_scale(dpi, wa);
+    const SIZE s = outer_size(dpi, scale);
+    RECT wr{};
+    if (at) wr = *at;
+    else GetWindowRect(hwnd, &wr);
+    LONG x = wr.left, y = wr.top;
+    if (keep_inside) {
+        const int m = margin_px(dpi);
+        x = std::max(std::min(x, wa.right - m - s.cx), wa.left + m);
+        y = std::max(std::min(y, wa.bottom - m - s.cy), wa.top + m);
+    }
+    SetWindowPos(hwnd, nullptr, x, y, s.cx, s.cy, SWP_NOZORDER | SWP_NOACTIVATE);
+    static float s_logged = 0;
+    static SIZE s_logged_size{};
+    if (scale != s_logged || s.cx != s_logged_size.cx || s.cy != s_logged_size.cy) {
+        s_logged = scale;
+        s_logged_size = s;
+        std::fprintf(stderr,
+                     "[win.apk] window: %dx%d dp at %.3f px/dp (client %dx%d, frames %dx%d), %u dpi, work area "
+                     "%ldx%ld at %ld,%ld\n",
+                     g_phone_w, g_phone_h, scale, client_px(g_phone_w, scale), client_px(g_phone_h, scale),
+                     client_px(g_phone_w, g_surface_scale), client_px(g_phone_h, g_surface_scale), dpi,
+                     wa.right - wa.left, wa.bottom - wa.top, wa.left, wa.top);
+    }
+}
+
+void refit(HWND hwnd) {
+    fit_window(hwnd, MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), window_dpi(hwnd), nullptr, true);
 }
 
 void paint(HWND hwnd) {
@@ -249,12 +421,36 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_CHAR:
         case WM_SYSCHAR:
             return 0;  // characters already went out with the key-down
+        // Another monitor's scale: Windows suggests a rect at the new DPI; the
+        // window takes its place but fits its size to that monitor. While the
+        // user drags, it is not pushed around; WM_EXITSIZEMOVE settles it.
         case WM_DPICHANGED: {
             const RECT* r = reinterpret_cast<const RECT*>(lp);
-            SetWindowPos(hwnd, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top,
-                         SWP_NOZORDER | SWP_NOACTIVATE);
+            fit_window(hwnd, MonitorFromRect(r, MONITOR_DEFAULTTONEAREST), HIWORD(wp), r, !g_in_size_move);
             return 0;
         }
+        case WM_ENTERSIZEMOVE:
+            g_in_size_move = true;
+            break;
+        case WM_EXITSIZEMOVE:
+            g_in_size_move = false;
+            if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != g_fit_monitor) refit(hwnd);
+            break;
+        // Moved to another monitor without a drag (Win+Shift+Arrow, a
+        // program): fitted for that monitor's work area.
+        case WM_WINDOWPOSCHANGED:
+            if (!g_in_size_move && g_fit_monitor && IsWindowVisible(hwnd) &&
+                MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != g_fit_monitor) {
+                refit(hwnd);
+            }
+            break;
+        // The work area changed: the taskbar moved, grew or was set to hide.
+        case WM_SETTINGCHANGE:
+            if (wp == SPI_SETWORKAREA) refit(hwnd);
+            break;
+        case WM_DISPLAYCHANGE:
+            refit(hwnd);
+            break;
         case kMsgShow:
             ShowWindow(hwnd, SW_SHOWNORMAL);
             SetForegroundWindow(hwnd);
@@ -263,11 +459,9 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             ShowWindow(hwnd, static_cast<int>(wp));
             if (wp == SW_RESTORE) SetForegroundWindow(hwnd);
             return 0;
-        case kMsgResize: {
-            const SIZE s = outer_size(hwnd, static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE)));
-            SetWindowPos(hwnd, nullptr, 0, 0, s.cx, s.cy, SWP_NOZORDER | SWP_NOMOVE | SWP_NOACTIVATE);
+        case kMsgResize:  // the app turned the phone
+            refit(hwnd);
             return 0;
-        }
         case WM_CLOSE:
             g_input->close_requested();
             return 0;
@@ -282,6 +476,8 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 minimized = false;
                 g_input->restored();
             }
+            // A fit that came while minimized or maximized.
+            if (wp == SIZE_RESTORED && g_refit_pending) PostMessageW(hwnd, kMsgResize, 0, 0);
             break;
         }
         default:
@@ -305,18 +501,24 @@ DWORD WINAPI ui_thread(void* param) {
     wc.hIcon = LoadIconW(nullptr, MAKEINTRESOURCEW(32512));  // IDI_APPLICATION
     wc.lpszClassName = kClassName;
     RegisterClassExW(&wc);
-    const DWORD style = WS_OVERLAPPEDWINDOW;
-    const SIZE s = outer_size(nullptr, style);
-    g_hwnd = CreateWindowExW(0, kClassName, L"Win.apk", style, CW_USEDEFAULT, CW_USEDEFAULT, s.cx, s.cy, nullptr,
+    const SIZE s = outer_size(g_plan.dpi, target_scale(g_plan.dpi, work_area(g_plan.monitor)));
+    g_hwnd = CreateWindowExW(0, kClassName, L"Win.apk", kStyle, CW_USEDEFAULT, CW_USEDEFAULT, s.cx, s.cy, nullptr,
                              nullptr, wc.hInstance, nullptr);
-    // CW_USEDEFAULT cascades the window down the screen; keep its bottom edge
-    // on the work area, which the phone height was chosen to fit.
-    RECT wr{}, wa{};
-    if (g_hwnd && GetWindowRect(g_hwnd, &wr) && SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0) &&
-        wr.bottom > wa.bottom) {
-        const int y = wa.bottom - (wr.bottom - wr.top);
-        SetWindowPos(g_hwnd, nullptr, wr.left, y > wa.top ? y : wa.top, 0, 0,
-                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    if (g_hwnd) {
+        // CW_USEDEFAULT cascades the window down the primary monitor. It
+        // opens on the monitor the plan was made for (where the user started
+        // the app), wholly inside its work area.
+        RECT wr{};
+        GetWindowRect(g_hwnd, &wr);
+        if (g_plan.monitor && MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST) != g_plan.monitor) {
+            const RECT wa = work_area(g_plan.monitor);
+            const LONG w = wr.right - wr.left, h = wr.bottom - wr.top;
+            const LONG x = wa.left + (wa.right - wa.left - w) / 2, y = wa.top + (wa.bottom - wa.top - h) / 2;
+            wr = RECT{x, y, x + w, y + h};
+            SetWindowPos(g_hwnd, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        fit_window(g_hwnd, g_plan.monitor ? g_plan.monitor : MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST),
+                   window_dpi(g_hwnd), &wr, true);
     }
     args->ok = g_hwnd != nullptr;
     SetEvent(args->ready);
@@ -340,12 +542,35 @@ void enable_dpi_awareness() {
 
 }  // namespace
 
-bool window_start(int phone_w, int phone_h, WindowInput* input) {
+float window_plan(int phone_w, int phone_h) {
+    enable_dpi_awareness();
+    // The monitor the user started the app from: the foreground window's
+    // (the launcher, a Start menu, Explorer), else the primary one.
+    HWND fg = GetForegroundWindow();
+    g_plan.monitor = fg ? MonitorFromWindow(fg, MONITOR_DEFAULTTOPRIMARY)
+                        : MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
+    g_plan.dpi = monitor_dpi(g_plan.monitor);
+    const float natural = static_cast<float>(g_plan.dpi) / 96.0f;
+    g_plan.scale = std::min(natural, fit_scale(work_area(g_plan.monitor), g_plan.dpi, phone_w, phone_h));
+    g_plan.set = true;
+    return g_plan.scale;
+}
+
+int window_density_dpi(float scale) {
+    return std::clamp(static_cast<int>(std::floor(scale * 160.0f + 0.001f)), 120, 640);
+}
+
+bool window_start(int phone_w, int phone_h, float surface_scale, WindowInput* input) {
     if (g_hwnd) return true;
     g_input = input;
+    if (!g_plan.set) window_plan(phone_w, phone_h);
     g_phone_w = phone_w;
     g_phone_h = phone_h;
-    enable_dpi_awareness();
+    g_surface_scale = surface_scale > 0 ? surface_scale : 1.0f;
+    // The density came from the plan (no WINAPK_DENSITY): the window shows
+    // the frames pixel for pixel.
+    const bool planned = std::fabs(g_surface_scale * 160.0f - static_cast<float>(window_density_dpi(g_plan.scale))) < 0.5f;
+    g_base_scale = planned ? g_surface_scale : g_plan.scale;
     StartArgs args{CreateEventW(nullptr, TRUE, FALSE, nullptr), false};
     HANDLE t = CreateThread(nullptr, 0, ui_thread, &args, 0, nullptr);
     if (!t) return false;
@@ -452,16 +677,6 @@ void window_set_title(const std::string& utf8) {
     std::wstring w(static_cast<size_t>(n > 0 ? n : 1), L'\0');
     MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, &w[0], n);
     SetWindowTextW(g_hwnd, w.c_str());  // sends to the UI thread
-}
-
-int window_max_phone_height() {
-    enable_dpi_awareness();
-    RECT wa{};
-    if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0)) return 0;
-    RECT frame{0, 0, 0, 0};
-    AdjustWindowRectEx(&frame, WS_OVERLAPPEDWINDOW, FALSE, 0);
-    const int avail = (wa.bottom - wa.top) - (frame.bottom - frame.top);
-    return avail > 0 ? MulDiv(avail, 96, static_cast<int>(window_dpi(nullptr))) : 0;
 }
 
 void window_set_phone_size(int phone_w, int phone_h) {

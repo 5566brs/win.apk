@@ -32,18 +32,30 @@ public:
     virtual void restored() {}
 };
 
-// Creates the window (hidden) for a phone of phone_w by phone_h points.
+// The scale, in pixels per dp, the window will open at for a phone of phone_w
+// by phone_h dp: the scale of the monitor the app is started on, or less, so
+// that the whole window fits that monitor's work area (the screen without the
+// taskbar) with a small margin. Remembered for window_start. The runtime
+// makes the app's density from it (window_density_dpi), so the frames come at
+// the window's own pixel size. WINAPK_TEST_WORKAREA=<w>x<h>[+<x>+<y>], in
+// pixels, stands in for the work area (testing; see win32_window.cpp).
+float window_plan(int phone_w, int phone_h);
+// The density, in dpi, for a scale in px per dp: scale x 160, rounded down
+// so the window still fits, within the 120..640 the Java side accepts.
+int window_density_dpi(float scale);
+
+// Creates the window (hidden) for a phone of phone_w by phone_h points, whose
+// frames come at surface_scale pixels per point (the app's density / 160).
+// The window is fitted to its monitor's work area, at launch and whenever the
+// monitor, the work area or the phone's orientation changes.
 // Returns false when there is no desktop to put a window on.
-bool window_start(int phone_w, int phone_h, WindowInput* input);
+bool window_start(int phone_w, int phone_h, float surface_scale, WindowInput* input);
 bool window_running();
 
 void window_show();
 void window_set_title(const std::string& utf8);
 void window_set_phone_size(int phone_w, int phone_h);
 
-// The tallest phone, in dp, whose window fits the primary monitor's work area
-// at the system DPI; 0 when that cannot be found out.
-int window_max_phone_height();
 // The app moved its task to the back or front (Activity.moveTaskToBack).
 // The app window, for dialogs it owns (nullptr headless or before start).
 void* window_handle();
