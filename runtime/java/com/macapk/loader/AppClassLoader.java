@@ -1826,6 +1826,15 @@ public final class AppClassLoader extends dalvik.system.PathClassLoader {
      *  findLibrary's cache + native-id stamp. */
     private int exposeDylibsForSoLoader(File srcDir, File exposeDir,
                                         java.util.Map<String, File[]> exposed) {
+        // One stub maker at a time: an app thread's on-demand System.load
+        // (loadNativeOnDemand) writes the same lib_native slots.
+        synchronized (stubLock) {
+            return exposeDylibsLocked(srcDir, exposeDir, exposed);
+        }
+    }
+
+    private int exposeDylibsLocked(File srcDir, File exposeDir,
+                                   java.util.Map<String, File[]> exposed) {
         if (srcDir == null || !srcDir.isDirectory()) return 0;
         if (exposeDir == null || !exposeDir.isDirectory()) return 0;
         File[] sos = srcDir.listFiles((d, n) -> n.startsWith("lib") && n.endsWith(".so"));
@@ -1851,13 +1860,9 @@ public final class AppClassLoader extends dalvik.system.PathClassLoader {
                     if (exposed != null) exposed.put(so.getName(), new File[]{so, cached});
                     continue;
                 }
-                if (!(srcOk && cached.exists() && nativeIdMatches(cached))) {
-                    if (!translate(so, cached, libBias.getOrDefault(libname, 0L))) {
-                        failed++;
-                        continue;   // translate() logs (incl. the non-ELF skip)
-                    }
-                    writeNativeIdStamp(cached);
-                    writeSoSourceStamp(cached, so);
+                if (!ensureStub(so, cached, libBias.getOrDefault(libname, 0L), srcOk)) {
+                    failed++;
+                    continue;   // translate() logs (incl. the non-ELF skip)
                 }
                 // Symlink so a later System.loadLibrary("X") canonicalises to the
                 // same file (one image, no double JNI_OnLoad).
@@ -2390,9 +2395,13 @@ public final class AppClassLoader extends dalvik.system.PathClassLoader {
      *  in which case we fall back to the old behaviour rather than not loading
      *  the library at all. */
     private Class<?> nativeLoaderShim;
+    private final Object nativeLoaderShimLock = new Object();
 
-    private void loadIntoThisLoader(String absPath) {
-        try {
+    /** The shim, defined on first use. Under a lock: app threads now load
+     *  libraries through it too (loadNativeOnDemand), and a second concurrent
+     *  defineClass of the same name throws LinkageError. */
+    private Class<?> nativeLoaderShim() throws IOException {
+        synchronized (nativeLoaderShimLock) {
             if (nativeLoaderShim == null) {
                 String res = "com/macapk/loader/NativeLoaderShim.class";
                 java.io.InputStream in =
@@ -2407,9 +2416,15 @@ public final class AppClassLoader extends dalvik.system.PathClassLoader {
                         "com.macapk.loader.NativeLoaderShim", buf, 0, buf.length);
                 }
             }
-            if (nativeLoaderShim != null) {
-                java.lang.reflect.Method m =
-                    nativeLoaderShim.getMethod("load", String.class);
+            return nativeLoaderShim;
+        }
+    }
+
+    private void loadIntoThisLoader(String absPath) {
+        try {
+            Class<?> shim = nativeLoaderShim();
+            if (shim != null) {
+                java.lang.reflect.Method m = shim.getMethod("load", String.class);
                 m.invoke(null, absPath);
                 return;
             }
@@ -2418,6 +2433,223 @@ public final class AppClassLoader extends dalvik.system.PathClassLoader {
                 + "); falling back to the system-loader path");
         }
         Runtime.getRuntime().load(absPath);
+    }
+
+    // ---- System.load of an ELF, on demand (Windows host) ----------------------
+    //
+    // On Android, System.load takes the path of an ELF, and the library binds to
+    // the app's class loader. Apps rely on it for libraries they unpack
+    // THEMSELVES on their first run: WhatsApp decompresses its superpack into
+    // files/decompressed/<archive>/ and SoLoader then System.load()s
+    // libwhatsappmerged.so from there; ReLinker extracts lib/<abi>/libX.so from
+    // the APK into app_lib/ and System.load()s it. The JVM takes only a host
+    // library, so Win.apk gives each ELF a stub DLL whose .source sidecar names
+    // it (the output of its Windows translator, see windows/host/guest_libs.h
+    // in Win.apk). The startup exposure (prepareDirectDlopenLibs) makes those
+    // stubs only for files that exist before the app runs, so on a FIRST
+    // launch nothing existed for the libraries the app had just unpacked:
+    // SoLoader threw SoLoaderDSONotFoundError for "whatsappmerged.dll" and
+    // WhatsApp showed CorruptInstallationActivity, while the second launch
+    // worked.
+    //
+    // ClassFileRewriter Pattern N routes guest System.load / Runtime.load here
+    // (through NativeLoadBridge) and gives guest System.mapLibraryName Android's
+    // "libX.so", so a loader that builds file names finds the ELF itself. An ELF
+    // gets its stub now, made the way the startup exposure makes one; any other
+    // path is loaded as given.
+    //
+    // ONE STUB PER PATH. A stub is cached in lib_native/ by path + size + mtime
+    // (its .source and .src sidecars) and reused across launches. Within a run a
+    // path keeps the stub it got first, so a second System.load is a no-op for
+    // the JVM, as it is on Android; a second stub module for the same ELF would
+    // run its JNI_OnLoad again. An ELF in the app's installed lib dir uses
+    // findLibrary's own slot, lib_native/libX.dylib, so System.load and
+    // System.loadLibrary of one library meet in one module. An ELF elsewhere
+    // uses that slot when it already names this ELF (a stub the startup exposure
+    // made) or no other library has a claim on it, and else a slot of its own
+    // under lib_native/ondemand/<dir hash>/.
+    //
+    // JNI BINDING. System.load binds a library to its CALLER's class loader
+    // (Reflection.getCallerClass). A call from the bridge or from this class
+    // would register it with the framework's loader, where HotSpot never looks
+    // for an app class's natives. So the load runs in this loader's own copy of
+    // NativeLoaderShim, as preloadDependencies does, and its errors reach the
+    // app as System.load's would. MACAPK_ONDEMAND_NATIVE=0 (read by the
+    // rewriter) restores the old behaviour.
+
+    /** Guards writes of lib_native stubs: the startup exposure's and the
+     *  on-demand ones. */
+    private final Object stubLock = new Object();
+    /** Canonical ELF path -> the stub this run loads it through. */
+    private final java.util.Map<String, File> onDemandStubs =
+        new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** Guest System.load(filename) and Runtime.load(filename), from
+     *  NativeLoadBridge: an ELF through its stub, anything else as given, both
+     *  as if called by a class of this loader. */
+    public void loadNativeOnDemand(String filename) {
+        String target = filename;
+        if (filename != null) {
+            File f = new File(filename);
+            if (f.isAbsolute() && isElf(f)) target = onDemandStub(f).getAbsolutePath();
+        }
+        loadAsApp(target);
+    }
+
+    /** System.load(path) from this loader's NativeLoaderShim. Unlike
+     *  loadIntoThisLoader, a failure reaches the caller as System.load's own. */
+    private void loadAsApp(String path) {
+        Class<?> shim = null;
+        try {
+            shim = nativeLoaderShim();
+        } catch (Throwable t) {
+            NativeLog.w(TAG, "loadNativeOnDemand: no NativeLoaderShim (" + t + ")");
+        }
+        if (shim == null) {
+            // Loads, but binds to the framework's loader (see above).
+            NativeLog.w(TAG, "loadNativeOnDemand(" + path + "): loading without the shim;"
+                + " the app's natives in it will not resolve");
+            Runtime.getRuntime().load(path);
+            return;
+        }
+        try {
+            shim.getMethod("load", String.class).invoke(null, path);
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof Error) throw (Error) cause;
+            if (cause instanceof RuntimeException) throw (RuntimeException) cause;
+            throw new IllegalStateException("System.load(" + path + ")", cause);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("NativeLoaderShim.load", e);
+        }
+    }
+
+    /** The stub to load `elf` through: the one this run already uses for that
+     *  path, else a cached or new one (makeOnDemandStub). */
+    private File onDemandStub(File elf) {
+        File so;
+        try { so = elf.getCanonicalFile(); }
+        catch (IOException e) { so = elf.getAbsoluteFile(); }
+        String key = so.getPath();
+        File stub = onDemandStubs.get(key);
+        if (stub != null) return stub;
+        synchronized (stubLock) {
+            stub = onDemandStubs.get(key);
+            if (stub == null) {
+                stub = makeOnDemandStub(so);
+                onDemandStubs.put(key, stub);
+            }
+            return stub;
+        }
+    }
+
+    /** Called under stubLock. Logs one line per stub. */
+    private File makeOnDemandStub(File so) {
+        if (translatorBin == null || !translatorBin.canExecute())
+            throw new UnsatisfiedLinkError("dlopen failed: no translator for \"" + so + "\"");
+        String name = so.getName();
+        String base = name.endsWith(".so") ? name.substring(0, name.length() - 3) : name;
+        File cacheDir = new File(appDir, "lib_native");
+        File shared = new File(cacheDir, base + ".dylib");
+        File own = new File(cacheDir, "ondemand/" + dirKey(so.getParentFile()) + "/" + base + ".dylib");
+        File[] slots = stubNames(shared, so) || maySharedSlotServe(shared, so)
+            ? new File[]{shared, own} : new File[]{own};
+        for (File slot : slots) {
+            String how;
+            if (slot.isFile() && stubNames(slot, so) && soSourceMatches(slot, so)
+                    && nativeIdMatches(slot)) {
+                how = "reused stub ";
+            } else {
+                slot.getParentFile().mkdirs();
+                if (ensureStub(so, slot, 0L, false)) {
+                    how = "new stub ";
+                } else if (slot.isFile() && stubNames(slot, so)) {
+                    // Not rewritable (Windows keeps a DLL the JVM loaded
+                    // locked), but it loads this very file: a stub holds no
+                    // code of its ELF, only the path.
+                    how = "reused stub (not refreshed) ";
+                } else {
+                    continue;
+                }
+            }
+            NativeLog.i(TAG, "on-demand native: " + so + " -> " + how + slot);
+            return slot;
+        }
+        throw new UnsatisfiedLinkError("dlopen failed: cannot make a stub for \"" + so
+            + "\" (see the translator lines above)");
+    }
+
+    /** May lib_native/libX.dylib, findLibrary's slot, be (re)made for `so`?
+     *  Yes for the installed lib dir's own libX.so. For an ELF elsewhere only
+     *  when no other library has a claim on it: none in the installed lib dir
+     *  by that name, none whose existing file the slot names, and not a stub
+     *  this run already uses for another path. */
+    private boolean maySharedSlotServe(File shared, File so) {
+        File libDir = nativeLibDir();
+        if (libDir != null && sameFile(libDir, so.getParentFile())) return true;
+        if (libDir != null && new File(libDir, so.getName()).exists()) return false;
+        File other = stubSource(shared);
+        if (other != null && other.isFile()) return false;
+        return !onDemandStubs.containsValue(shared);
+    }
+
+    /** The startup exposure's stub making, also used on demand: keep `cached`
+     *  when its source stamp (srcOk: size + mtime of `so`) and native-id stamp
+     *  hold, else translate `so` into it and stamp it. */
+    private boolean ensureStub(File so, File cached, long bias, boolean srcOk) {
+        if (srcOk && cached.exists() && nativeIdMatches(cached)) return true;
+        if (!translate(so, cached, bias)) return false;
+        writeNativeIdStamp(cached);
+        writeSoSourceStamp(cached, so);
+        return true;
+    }
+
+    /** Does the stub `stub` load `so`? Its .source sidecar names the ELF. */
+    private static boolean stubNames(File stub, File so) {
+        File src = stubSource(stub);
+        return src != null && sameFile(src, so);
+    }
+
+    /** The ELF a Windows stub loads: the path in its .source sidecar. */
+    private static File stubSource(File stub) {
+        try {
+            File side = new File(stub.getPath() + ".source");
+            if (!side.isFile()) return null;
+            String p = new String(java.nio.file.Files.readAllBytes(side.toPath()),
+                                  java.nio.charset.StandardCharsets.UTF_8).trim();
+            return p.isEmpty() ? null : new File(p);
+        } catch (IOException | RuntimeException e) {
+            return null;
+        }
+    }
+
+    private static boolean sameFile(File a, File b) {
+        try { return a.getCanonicalFile().equals(b.getCanonicalFile()); }
+        catch (IOException e) { return a.getAbsoluteFile().equals(b.getAbsoluteFile()); }
+    }
+
+    private static boolean isElf(File f) {
+        if (!f.isFile()) return false;
+        try (java.io.InputStream in = new java.io.FileInputStream(f)) {
+            return in.read() == 0x7f && in.read() == 'E' && in.read() == 'L' && in.read() == 'F';
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    /** A short, stable name for a directory: SHA-256 of its path, case-folded
+     *  as Windows paths are. */
+    private static String dirKey(File dir) {
+        String p = dir == null ? "" : dir.getPath().toLowerCase(java.util.Locale.ROOT);
+        try {
+            byte[] d = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(p.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < 8; i++) sb.append(String.format("%02x", d[i] & 0xff));
+            return sb.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            return Integer.toHexString(p.hashCode());
+        }
     }
 
     /** Preference order matching Android's own ABI fallback. The translator
