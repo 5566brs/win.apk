@@ -6,7 +6,7 @@
 //      scripts/build_java.sh builds, <root>/jre (or JAVA_HOME) the JDK.
 //   2. Convert the APK's DEX to <app dir>/classes.jar with upstream's
 //      converter (com.macapk.dex.Main), in a child java.exe, unless the cached
-//      jar is newer than the APK.
+//      jar was made from this APK by this converter (.macapk-dex-stamp).
 //   3. Create the JVM in-process with upstream's options, on a thread with a
 //      large stack (-Xss does not apply to the thread that creates the VM).
 //   4. Bind the host natives (host_natives.h).
@@ -162,13 +162,156 @@ int run_process(std::wstring cmdline) {
 
 std::wstring quoted(const fs::path& p) { return L"\"" + p.wstring() + L"\""; }
 
+// "<size>:<last write time>" of a file, or "" when it cannot be read.
+std::string file_id(const fs::path& p) {
+    WIN32_FILE_ATTRIBUTE_DATA a;
+    if (!GetFileAttributesExW(p.c_str(), GetFileExInfoStandard, &a)) return {};
+    const uint64_t size = static_cast<uint64_t>(a.nFileSizeHigh) << 32 | a.nFileSizeLow;
+    const uint64_t time =
+        static_cast<uint64_t>(a.ftLastWriteTime.dwHighDateTime) << 32 | a.ftLastWriteTime.dwLowDateTime;
+    return std::to_string(size) + ":" + std::to_string(time);
+}
+
+uint32_t le16(const unsigned char* p) { return p[0] | p[1] << 8; }
+uint32_t le32(const unsigned char* p) { return p[0] | p[1] << 8 | p[2] << 16 | static_cast<uint32_t>(p[3]) << 24; }
+
+// "<name> <length> <CRC-32>" of each file entry of `jar` under `prefix`, from
+// the jar's central directory (nothing is decompressed). False when the jar
+// cannot be read that way: not a zip, or ZIP64.
+bool jar_entries(const fs::path& jar, const std::string& prefix, std::vector<std::string>* rows) {
+    FILE* f = _wfopen(jar.c_str(), L"rb");
+    if (!f) return false;
+    auto read_at = [f](long long at, size_t n, std::vector<unsigned char>* out) {
+        out->resize(n);
+        return _fseeki64(f, at, SEEK_SET) == 0 && std::fread(out->data(), 1, n, f) == n;
+    };
+    bool ok = false;
+    const long long size = _fseeki64(f, 0, SEEK_END) == 0 ? _ftelli64(f) : -1;
+    // The end of central directory record: 22 bytes, then a comment of up to
+    // 64 KB.
+    const long long tail = std::min<long long>(size, 22 + 0xFFFF);
+    std::vector<unsigned char> end, dir;
+    if (tail >= 22 && read_at(size - tail, static_cast<size_t>(tail), &end)) {
+        for (size_t i = end.size() - 22 + 1; i-- > 0;) {
+            if (le32(&end[i]) != 0x06054b50) continue;
+            const uint32_t dir_size = le32(&end[i + 12]), dir_at = le32(&end[i + 16]);
+            if (static_cast<long long>(dir_at) + dir_size > size - tail + static_cast<long long>(i) ||
+                !read_at(dir_at, dir_size, &dir)) {
+                break;
+            }
+            size_t p = 0;
+            while (p + 46 <= dir.size() && le32(&dir[p]) == 0x02014b50) {
+                const size_t name_len = le16(&dir[p + 28]);
+                const size_t next = p + 46 + name_len + le16(&dir[p + 30]) + le16(&dir[p + 32]);
+                if (next > dir.size()) break;
+                const std::string name(reinterpret_cast<const char*>(&dir[p + 46]), name_len);
+                if (name.rfind(prefix, 0) == 0 && name.back() != '/') {
+                    rows->push_back(name + ' ' + std::to_string(le32(&dir[p + 24])) + ' ' +
+                                    std::to_string(le32(&dir[p + 16])));
+                }
+                p = next;
+            }
+            ok = p == dir.size();
+            break;
+        }
+    }
+    std::fclose(f);
+    return ok;
+}
+
+// Which converter `loader_jar` holds: "dex:" and an FNV-1a hash of the
+// com/macapk/dex/ entries' names, lengths and CRC-32s, which is upstream's
+// CONVERTER_ID basis (runtime/scripts/build_ids.py). A CRC is of an entry's
+// content, so a rebuild of the same sources keeps the id, and so does a
+// release that changes only the framework or the loader: the converter runs
+// with this jar alone on its class path (convert_dex), so no framework class
+// shapes what it writes. A jar that cannot be read so is keyed by its file
+// ("jar:<size>:<time>").
+std::string converter_id(const fs::path& loader_jar) {
+    std::vector<std::string> rows;
+    if (!jar_entries(loader_jar, "com/macapk/dex/", &rows) || rows.empty()) return "jar:" + file_id(loader_jar);
+    std::sort(rows.begin(), rows.end());
+    uint64_t h = 1469598103934665603ull;
+    for (const std::string& r : rows) {
+        for (const char c : r + '\n') h = (h ^ static_cast<unsigned char>(c)) * 1099511628211ull;
+    }
+    char id[24];
+    std::snprintf(id, sizeof id, "dex:%016llx", static_cast<unsigned long long>(h));
+    return id;
+}
+
+// <app dir>\.macapk-dex-stamp says what the cached classes.jar was made from,
+// in two lines:
+//
+//   converter=<converter_id>   the converter that made it
+//   apk=<file_id>              the installed base.apk it was made from
+//
+// It is written after the jar is in place. The jar is made again when either
+// line differs, and when there is no stamp: such a jar is from a release
+// before the stamp, made by a converter nobody recorded, perhaps the very one
+// an update fixed. Converting it once is the correction, as upstream does
+// for a .source-mtime without a JAVA_ID (apk_unpacker.cpp, CacheIsFresh).
+// The name starts with ".macapk", so Boot's code-dir scan
+// (Boot.isCodeDirArtifact) leaves the file here rather than moving it into
+// the app's data.
+struct DexStamp {
+    std::string converter, apk;
+};
+
+bool read_dex_stamp(const fs::path& path, DexStamp* s) {
+    FILE* f = _wfopen(path.c_str(), L"rb");
+    if (!f) return false;
+    std::string text;
+    char buf[512];
+    for (size_t n; (n = std::fread(buf, 1, sizeof(buf), f)) > 0;) text.append(buf, n);
+    std::fclose(f);
+    for (size_t i = 0; i < text.size();) {
+        const size_t j = std::min(text.find('\n', i), text.size());
+        const std::string line = text.substr(i, j - i);
+        if (line.rfind("converter=", 0) == 0) s->converter = line.substr(10);
+        else if (line.rfind("apk=", 0) == 0) s->apk = line.substr(4);
+        i = j + 1;
+    }
+    return !s->converter.empty() && !s->apk.empty();
+}
+
+// Written to a temporary name and renamed, so the stamp is whole or absent.
+bool write_dex_stamp(const fs::path& path, const DexStamp& s) {
+    std::error_code ec;
+    const fs::path tmp = path.wstring() + L".tmp";
+    const std::string text = "converter=" + s.converter + "\napk=" + s.apk + "\n";
+    FILE* f = _wfopen(tmp.c_str(), L"wb");
+    if (!f) return false;
+    const bool written = std::fwrite(text.data(), 1, text.size(), f) == text.size();
+    if (std::fclose(f) != 0 || !written) {
+        fs::remove(tmp, ec);
+        return false;
+    }
+    fs::rename(tmp, path, ec);
+    return !ec;
+}
+
 // Step 2. Exit codes are com.macapk.dex.Main's: 0 converted, 3 no DEX in the
 // APK (a valid case: the app then has no classes.jar).
+//
+// A failed conversion leaves the cached jar as it was. When that jar was made
+// from this same APK, so that only the converter changed, the app runs on it
+// as it did before the update, and the next start converts again.
 bool convert_dex(const Options& o, const fs::path& app_dir, fs::path* jar) {
     std::error_code ec;
     *jar = app_dir / "classes.jar";
-    if (fs::exists(*jar, ec) && fs::last_write_time(*jar, ec) >= fs::last_write_time(o.apk, ec)) return true;
-    std::fprintf(stderr, "[win.apk] converting the app's code (once per install)...\n");
+    const fs::path stamp = app_dir / ".macapk-dex-stamp";
+    const DexStamp want{converter_id(o.lib / "macapk-loader.jar"), file_id(o.apk)};
+    DexStamp have;
+    const bool stamped = read_dex_stamp(stamp, &have);
+    const bool cached = fs::exists(*jar, ec);
+    const char* why = !cached                            ? "once per install"
+                      : !stamped                         ? "the cached copy has no converter stamp"
+                      : have.converter != want.converter ? "the converter changed"
+                      : have.apk != want.apk             ? "the app changed"
+                                                         : nullptr;
+    if (!why) return true;
+    std::fprintf(stderr, "[win.apk] converting the app's code (%s)...\n", why);
     const fs::path tmp = app_dir / "classes.jar.tmp";
     const int rc = run_process(quoted(o.jdk / "bin" / "java.exe") + L" -cp " + quoted(o.lib / "macapk-loader.jar") +
                                L" com.macapk.dex.Main " + quoted(o.apk) + L" " + quoted(tmp));
@@ -176,12 +319,29 @@ bool convert_dex(const Options& o, const fs::path& app_dir, fs::path* jar) {
         jar->clear();
         return true;
     }
-    if (rc != 0) {
+    if (rc == 0) {
+        fs::rename(tmp, *jar, ec);
+        if (!ec) {
+            if (!write_dex_stamp(stamp, want)) {
+                std::fprintf(stderr, "[win.apk] warning: cannot write %s; the next start converts the code again\n",
+                             utf8(stamp.wstring()).c_str());
+            }
+            return true;
+        }
+        std::fprintf(stderr, "[win.apk] DEX conversion failed: cannot replace %s (%s)\n",
+                     utf8(jar->wstring()).c_str(), ec.message().c_str());
+        fs::remove(tmp, ec);
+    } else {
         std::fprintf(stderr, "[win.apk] DEX conversion failed (exit code %d)\n", rc);
-        return false;
     }
-    fs::rename(tmp, *jar, ec);
-    return !ec;
+    const bool same_apk = cached && (stamped ? have.apk == want.apk
+                                             : fs::last_write_time(*jar, ec) >= fs::last_write_time(o.apk, ec));
+    if (!same_apk) return false;
+    std::fprintf(stderr,
+                 "[win.apk] WARNING: the app's code was NOT converted again. It runs on the copy the previous "
+                 "converter made, without this converter's fixes; the next start converts again.\n");
+    std::fflush(stderr);
+    return true;
 }
 
 // Step 1: install the app the way a device's installer does, into
