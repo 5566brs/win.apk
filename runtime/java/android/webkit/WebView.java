@@ -1136,6 +1136,7 @@ public class WebView extends android.widget.AbsoluteLayout
             // FLAG_NOT_TOUCHABLE takes no clicks; a FLAG_NOT_TOUCH_MODAL one
             // covers only its own bounds; a modal one takes every click.
             boolean modalAbove = false;
+            android.graphics.Rect modalBounds = null;
             try {
                 android.view.View myRoot = getRootView();
                 java.util.List<com.macapk.loader.WindowOverlayStack.Layer> layers =
@@ -1155,12 +1156,19 @@ public class WebView extends android.widget.AbsoluteLayout
                         continue;
                     }
                     modalAbove = true;
+                    modalBounds = l.bounds != null ? new android.graphics.Rect(l.bounds) : null;
                     break;
                 }
             } catch (Throwable ignored) { }
             if (modalAbove) {
                 out.clear();
                 out.add(wv);
+                // The modal window's own bounds after the whole-view rect: the
+                // whole rect is what takes the clicks, and the union is the
+                // same; a host that composites the page ABOVE the canvas
+                // (Windows: a child window) also needs to know where the
+                // dialog itself is drawn, so it can show it over the page.
+                if (modalBounds != null && modalBounds.intersect(wv)) out.add(modalBounds);
             } else {
                 // The parts an ancestor clips away (a ScrollView / RecyclerView
                 // scrolled it partly out): the canvas covers them, so the page

@@ -204,6 +204,11 @@ struct View {
     std::wstring data_mime;
     // a materialized file:///android_asset/ tree: file URL prefix -> asset URL prefix
     std::wstring asset_file_prefix, asset_url_prefix = L"file:///android_asset/";
+    // Navigations the app took (shouldOverrideUrlLoading true): WebView2 may
+    // already be sending their request when the cancel lands, so the document
+    // request is answered here instead (204, nothing loads), as on a device,
+    // where the URL never reaches the network.
+    std::vector<std::wstring> refused;
 };
 
 std::map<int, View*> g_views;  // WebView2 thread only
@@ -279,9 +284,21 @@ void place(View* v) {
         v->placed_visible = true;
     }
     // The app's views drawn over the page: cut out of the window, so they show
-    // (the parent paints there) and take their own clicks.
+    // (the parent paints there) and take their own clicks. A first rect that
+    // is the whole view means a modal window is above it: alone, the view is
+    // covered; followed by the modal window's bounds (WebView.java
+    // macapkPushOccluders), the page stays in sight around the dialog and
+    // takes no input until it goes.
     HRGN rgn = CreateRectRgn(0, 0, r.right - r.left, r.bottom - r.top);
-    for (size_t k = 0; k + 3 < v->occluders.size(); k += 4) {
+    size_t first = 0;
+    bool modal = false;
+    if (v->occluders.size() >= 8 && v->occluders[0] <= v->x && v->occluders[1] <= v->y &&
+        v->occluders[0] + v->occluders[2] >= v->x + v->w && v->occluders[1] + v->occluders[3] >= v->y + v->h) {
+        first = 4;
+        modal = true;
+    }
+    EnableWindow(v->host, modal ? FALSE : TRUE);
+    for (size_t k = first; k + 3 < v->occluders.size(); k += 4) {
         const int ox = v->occluders[k], oy = v->occluders[k + 1], ow = v->occluders[k + 2], oh = v->occluders[k + 3];
         RECT o{static_cast<LONG>(ox * sx + 0.5) - r.left, static_cast<LONG>(oy * sy + 0.5) - r.top,
                static_cast<LONG>((ox + ow) * sx + 0.5) - r.left, static_cast<LONG>((oy + oh) * sy + 0.5) - r.top};
@@ -528,6 +545,8 @@ void hook(View* v) {
                     ask = false;
                 }
                 if (ask && app_overrides(v, uri, redirected == TRUE, user == TRUE)) {
+                    v->refused.push_back(uri);
+                    if (v->refused.size() > 8) v->refused.erase(v->refused.begin());
                     a->put_Cancel(TRUE);
                     return S_OK;
                 }
@@ -723,7 +742,7 @@ void hook(View* v) {
             IID_ICoreWebView2WebResourceRequestedEventHandler,
             [id](ICoreWebView2*, ICoreWebView2WebResourceRequestedEventArgs* a) -> HRESULT {
                 View* v = find_view(id);
-                if (!v || v->data_base.empty()) return S_OK;
+                if (!v) return S_OK;
                 ComPtr<ICoreWebView2WebResourceRequest> req;
                 a->get_Request(req.put());
                 LPWSTR raw = nullptr;
@@ -731,10 +750,19 @@ void hook(View* v) {
                 const std::wstring uri = wv2::take_co_string(raw);
                 COREWEBVIEW2_WEB_RESOURCE_CONTEXT ctx = COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL;
                 a->get_ResourceContext(&ctx);
-                if (ctx != COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT || uri != v->data_base) return S_OK;
+                if (ctx != COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT) return S_OK;
                 ComPtr<ICoreWebView2Environment> env;
                 if (auto v2 = v->wv.query<ICoreWebView2_2>(IID_ICoreWebView2_2)) v2->get_Environment(env.put());
                 if (!env) return S_OK;
+                for (auto r = v->refused.begin(); r != v->refused.end(); ++r) {
+                    if (*r != uri) continue;
+                    v->refused.erase(r);
+                    ComPtr<ICoreWebView2WebResourceResponse> none;
+                    env->CreateWebResourceResponse(nullptr, 204, L"No Content", L"", none.put());
+                    if (none) a->put_Response(none.get());
+                    return S_OK;
+                }
+                if (v->data_base.empty() || uri != v->data_base) return S_OK;
                 IStream* body = SHCreateMemStream(reinterpret_cast<const BYTE*>(v->data_bytes.data()),
                                                   static_cast<UINT>(v->data_bytes.size()));
                 const std::wstring headers = L"Content-Type: " + v->data_mime;
@@ -742,13 +770,13 @@ void hook(View* v) {
                 env->CreateWebResourceResponse(body, 200, L"OK", headers.c_str(), resp.put());
                 if (body) body->Release();
                 if (resp) a->put_Response(resp.get());
-                v->wv->RemoveWebResourceRequestedFilter(v->data_base.c_str(), COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT);
                 v->data_base.clear();
                 v->data_bytes.clear();
                 return S_OK;
             })
             .get(),
         &tok);
+    v->wv->AddWebResourceRequestedFilter(L"*", COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT);
     v->controller->add_GotFocus(
         wv2::handler<ICoreWebView2FocusChangedEventHandler>(
             IID_ICoreWebView2FocusChangedEventHandler,
@@ -1260,7 +1288,6 @@ void JNICALL Wv_nativeLoadData(JNIEnv* env, jclass, jint id, jstring jbase, jstr
                 v->data_base = base;
                 v->data_bytes = utf8_of(data);
                 v->data_mime = mime + L"; charset=utf-8";
-                v->wv->AddWebResourceRequestedFilter(base.c_str(), COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT);
                 v->wv->Navigate(base.c_str());
                 return;
             }
