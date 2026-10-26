@@ -38,6 +38,7 @@
 #include <cstdio>
 #include <map>
 #include <string>
+#include <vector>
 
 #include <windows.h>
 
@@ -76,6 +77,12 @@ struct Tab {
     bool handed_off = false;       // a URL went back to the app
     bool notified = false;         // Java heard that the tab is gone
     bool hover_close = false, hover_back = false;
+    // Web URLs the tab did not load (they went to the app): WebView2 may
+    // already be sending their request when the cancel lands, so the document
+    // request is answered here (204, nothing loads). On a device the browser
+    // decides before any request, so a sign-in callback's code never reaches
+    // the network.
+    std::vector<std::wstring> refused;
 };
 
 std::map<int, Tab*> g_tabs;  // WebView2 thread only
@@ -170,6 +177,11 @@ void hand_off(Tab* t, const std::wstring& url) {
 
 // A URL the tab will not load: a navigation that was cancelled, or a new window.
 void route_away(Tab* t, const std::wstring& url, bool user, Route r) {
+    const std::wstring scheme = wv2::scheme_of(url);
+    if (scheme == L"http" || scheme == L"https") {
+        t->refused.push_back(url);
+        if (t->refused.size() > 8) t->refused.erase(t->refused.begin());
+    }
     if (r == Route::kHandOff) {
         hand_off(t, url);
         return;
@@ -426,6 +438,34 @@ void hook_events(Tab* t) {
                 .get(),
             &token);
     }
+    t->view->add_WebResourceRequested(
+        wv2::handler<ICoreWebView2WebResourceRequestedEventHandler>(
+            IID_ICoreWebView2WebResourceRequestedEventHandler,
+            [id](ICoreWebView2* sender, ICoreWebView2WebResourceRequestedEventArgs* a) -> HRESULT {
+                Tab* t = find_tab(id);
+                if (!t || t->refused.empty()) return S_OK;
+                ComPtr<ICoreWebView2WebResourceRequest> req;
+                a->get_Request(req.put());
+                LPWSTR raw = nullptr;
+                if (req) req->get_Uri(&raw);
+                const std::wstring uri = wv2::take_co_string(raw);
+                for (auto r = t->refused.begin(); r != t->refused.end(); ++r) {
+                    if (*r != uri) continue;
+                    t->refused.erase(r);
+                    ComPtr<ICoreWebView2Environment> env;
+                    if (auto v2 = ComPtr<ICoreWebView2>::retain(sender).query<ICoreWebView2_2>(IID_ICoreWebView2_2)) {
+                        v2->get_Environment(env.put());
+                    }
+                    ComPtr<ICoreWebView2WebResourceResponse> none;
+                    if (env) env->CreateWebResourceResponse(nullptr, 204, L"No Content", L"", none.put());
+                    if (none) a->put_Response(none.get());
+                    break;
+                }
+                return S_OK;
+            })
+            .get(),
+        &token);
+    t->view->AddWebResourceRequestedFilter(L"*", COREWEBVIEW2_WEB_RESOURCE_CONTEXT_DOCUMENT);
     t->controller->add_AcceleratorKeyPressed(
         wv2::handler<ICoreWebView2AcceleratorKeyPressedEventHandler>(
             IID_ICoreWebView2AcceleratorKeyPressedEventHandler,
