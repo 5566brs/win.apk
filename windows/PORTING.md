@@ -213,7 +213,7 @@ implements in `runtime/src`; on Windows `windows/host/native_*.cpp`):
 | `GamepadBridge` | 1 | `gamecontroller_bridge.mm` | `host/native_gamepad.cpp`: XInput controllers, polled | done (no rumble or player LED) | - |
 | `CameraBridge` | 30 | `camera_capture.mm` | Media Foundation capture | not started | 3 |
 | `MediaStoreProvider` | 7 | `photos_bridge.mm` | `host/native_photos.cpp`: the Pictures and Videos folders, shell thumbnails | done | - |
-| `MacApkWebViewBridge` | 29 | `webview_bridge.mm` | WebView2 | not started | 2 |
+| `MacApkWebViewBridge` | 29 | `webview_bridge.mm` | WebView2 | not started (Custom Tabs: `HostBrowserTab`, done) | 2 |
 | `NativeSignIn` | 2 | `gms_signin.mm` | a browser sign-in window | not started | later |
 | `NativeActivity`, `InputQueue` | 22 + 5 | `bionic_shim_nativeactivity.cpp` | with M4/M6 | not started | 2 |
 | Firebase C++ helpers (4 classes) | 4 | the app's own native code | with M4 | - | - |
