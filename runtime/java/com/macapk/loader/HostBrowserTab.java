@@ -146,6 +146,13 @@ public final class HostBrowserTab {
     /** The app's WebView2 user-data folder: in its data directory, beside
      *  Android's own app_webview, so it is the app's alone, persists, and goes
      *  with the app's data. */
+    /** userDataFolder() as a path, for the host's web engine (the app's own
+     *  WebViews share it, in a profile of their own); null when unknown. */
+    public static String macapkUserDataFolderPath() {
+        File f = userDataFolder();
+        return f != null ? f.getPath() : null;
+    }
+
     static File userDataFolder() {
         try {
             android.app.Application app = android.app.Application.macapk_get();

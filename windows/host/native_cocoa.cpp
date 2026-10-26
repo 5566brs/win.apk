@@ -917,6 +917,11 @@ bool content_pixel_size(int* w, int* h) {
     return *w > 0 && *h > 0;
 }
 
+void phone_size_dp(int* w, int* h) {
+    *w = g_phone_w.load();
+    *h = g_phone_h.load();
+}
+
 void guest_frame_present(const uint32_t* argb, int w, int h) {
     if (g_guest_last_ms.exchange(GetTickCount64()) == 0) {
         std::fprintf(stderr, "[win.apk] native window: first frame from the app's native code (%dx%d)\n", w, h);

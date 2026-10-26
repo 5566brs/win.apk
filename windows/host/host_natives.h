@@ -49,6 +49,7 @@ HostMethods native_audio_input_methods(); // native_audio_input.cpp
 HostMethods native_photos_methods();    // native_photos.cpp
 HostMethods native_gl_methods();        // gl/gl_bridges.cpp
 HostMethods native_browser_tab_methods(); // native_browser_tab.cpp
+HostMethods native_webview_methods();   // native_webview.cpp
 
 // The app's directory under the data directory, where Boot renders the
 // launcher icon (icon.png) that becomes the window's icon. native_cocoa.cpp.
@@ -60,6 +61,9 @@ void set_app_dir(const std::wstring& dir);
 // it once on a Java thread first. native_cocoa.cpp.
 void prepare_host_url_queue(JNIEnv* env);
 void queue_host_url(JNIEnv* env, const std::wstring& url);
+
+// The phone the app sees now, in dp (turned with the app). native_cocoa.cpp.
+void phone_size_dp(int* w, int* h);
 
 struct NativeStats {
     int classes = 0;        // host classes found
