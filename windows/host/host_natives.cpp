@@ -96,6 +96,7 @@ const HostMethods kProviders[] = {
     native_photos_methods(),
     native_gl_methods(),
     native_browser_tab_methods(),
+    native_webview_methods(),
 };
 
 const JNINativeMethod* implementation_of(const char* clazz, const char* name, const char* sig) {
