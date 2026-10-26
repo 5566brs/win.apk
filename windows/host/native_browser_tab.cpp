@@ -657,11 +657,12 @@ void copy_app_icon(HWND tab) {
 void open_on_thread(Tab* t) {
     register_class();
     g_tabs[t->id] = t;
-    // Over the app's window, the way a Custom Tab covers the app on a phone;
-    // a phone-sized window where the app has none on screen.
+    // Over the app's window, the way a Custom Tab covers the app on a phone
+    // (that window is created, and placed, before the app's first activity
+    // shows it); a phone-sized window where the app has none.
     HWND app = static_cast<HWND>(window_handle());
     RECT r{};
-    const bool over_app = app && IsWindowVisible(app) && !IsIconic(app) && GetWindowRect(app, &r);
+    const bool over_app = app && !IsIconic(app) && GetWindowRect(app, &r) && r.right - r.left > 100;
     int x = CW_USEDEFAULT, y = CW_USEDEFAULT, w = CW_USEDEFAULT, h = CW_USEDEFAULT;
     if (over_app) {
         x = r.left;
