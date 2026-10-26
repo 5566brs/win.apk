@@ -17,13 +17,18 @@ What works
 - Sound from Java through AudioTrack and SoundPool (WAV, Ogg, MP3), saving
   data (files, SharedPreferences, SQLite), the clipboard, file open/save
   dialogs and game controllers.
+- Web pages, with the Microsoft Edge WebView2 Runtime (part of Windows 11
+  and most Windows 10 PCs): web pages inside apps (WebView) show in the
+  app's window, and sign-in pages an app opens in a browser tab (Custom
+  Tabs) open in a window of their own that hands the sign-in back to the
+  app. Other links open in your web browser.
 
 What does not work yet
 ----------------------
 - Apps that only have ARM native libraries (lib/arm64-v8a only).
 - NativeActivity games (pure C/C++ apps without a Java activity).
 - MediaPlayer and sound from native code (OpenSL ES, AAudio), video
-  playback, the camera, WebView (web pages inside apps), location.
+  playback, the camera, location.
 - Google Play services (sign-in, in-app purchases, maps).
 
 Installing Win.apk
