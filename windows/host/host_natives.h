@@ -48,10 +48,18 @@ HostMethods native_icu_methods();       // native_icu.cpp
 HostMethods native_audio_input_methods(); // native_audio_input.cpp
 HostMethods native_photos_methods();    // native_photos.cpp
 HostMethods native_gl_methods();        // gl/gl_bridges.cpp
+HostMethods native_browser_tab_methods(); // native_browser_tab.cpp
 
 // The app's directory under the data directory, where Boot renders the
 // launcher icon (icon.png) that becomes the window's icon. native_cocoa.cpp.
 void set_app_dir(const std::wstring& dir);
+
+// A URL the host hands to the app (NativeCocoa.takeHostUrls): queued, then
+// HostUrlIntake.macapkOnHostUrl is called on `env`'s thread so the intake
+// drains and delivers it. prepare_host_url_queue resolves that method; call
+// it once on a Java thread first. native_cocoa.cpp.
+void prepare_host_url_queue(JNIEnv* env);
+void queue_host_url(JNIEnv* env, const std::wstring& url);
 
 // The phone the app starts with, in dp: WINAPK_PHONE_SIZE, else 360x800.
 // native_cocoa.cpp.

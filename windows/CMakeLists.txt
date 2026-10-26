@@ -169,10 +169,24 @@ if(WINAPK_JNI_INCLUDE)
                               host/native_wallpaper.cpp host/native_picker.cpp
                               host/native_gamepad.cpp host/native_icu.cpp
                               host/native_audio_input.cpp host/native_photos.cpp
+                              host/webview2_host.cpp host/native_browser_tab.cpp
                               host/runtime.rc)
   target_link_libraries(winapk-runtime PRIVATE winapk_jni winapk_sqlite webpdecoder winapk_stb_vorbis windowscodecs
                         ole32 mfplat mfreadwrite mfuuid shlwapi advapi32 shell32 uuid)
   target_include_directories(winapk-runtime PRIVATE ${WINAPK_WEBP_DIR}/src)
+  # WebView2 (host/webview2_host.h): the SDK's header to build against, from
+  # scripts/fetch_webview2.sh; its WebView2Loader.dll is staged next to the
+  # runtime and loaded at run time, so nothing is linked.
+  set(WINAPK_WEBVIEW2_SDK ${CMAKE_CURRENT_SOURCE_DIR}/../thirdparty/webview2-sdk)
+  if(NOT EXISTS ${WINAPK_WEBVIEW2_SDK}/include/WebView2.h)
+    find_program(WINAPK_BASH bash REQUIRED)
+    execute_process(COMMAND ${WINAPK_BASH} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/fetch_webview2.sh
+                    RESULT_VARIABLE _wv2_rc)
+    if(NOT _wv2_rc EQUAL 0 OR NOT EXISTS ${WINAPK_WEBVIEW2_SDK}/include/WebView2.h)
+      message(FATAL_ERROR "windows/scripts/fetch_webview2.sh could not fetch the WebView2 SDK")
+    endif()
+  endif()
+  target_include_directories(winapk-runtime SYSTEM PRIVATE ${WINAPK_WEBVIEW2_SDK}/include)
   target_compile_options(winapk-runtime PRIVATE -Wall -Wextra)
   # GL (M6): upstream's android.opengl bindings, cut out of its Mac
   # native_methods.cpp at build time and compiled against the Khronos headers;
