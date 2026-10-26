@@ -5398,7 +5398,19 @@ public class Resources {
         } catch (Throwable ignored) {}
         return false;
     }
-    public float getFloat(int id) { return 0f; }
+    /** AOSP Resources.getFloat (API 29): getValue, then the value of a
+     *  TYPE_FLOAT row (<item type="dimen" format="float">). Was a `return 0f`
+     *  stub: Spotify sizes its side drawer as widthPixels * a float dimen, so
+     *  the drawer measured 0 wide, DrawerLayout's slide offset came out 0/0 =
+     *  NaN, and the main layout it translates by that offset drew nothing (a
+     *  black screen after sign-in). Answers 0 for another type, where AOSP
+     *  throws NotFoundException, as getFraction below does. */
+    public float getFloat(int id) {
+        android.util.TypedValue tv = new android.util.TypedValue();
+        try { getValue(id, tv, true); } catch (Throwable t) { return 0f; }
+        if (tv.type == android.util.TypedValue.TYPE_FLOAT) return tv.getFloat();
+        return 0f;
+    }
     public float getFraction(int id, int base, int pbase) {
         // AOSP Resources.getFraction (Resources.java:1130, android11-release):
         // getValue then complexToFraction(data, base, pbase) -- %  multiplies
