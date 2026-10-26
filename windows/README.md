@@ -141,8 +141,15 @@ before, and the log says so once.
   Tabs service, so apps that look for one choose a Custom Tab.
 - A plain link (an "open in browser", a Privacy Policy link) still opens in the
   system browser: on a phone that is the user's browser app too.
+- An app's own `android.webkit.WebView`s show the page in the app window, at
+  the view's place, behind the app's views drawn over it: upstream's Java
+  WebView runs unchanged on WebView2 (`native_webview.cpp`), with
+  `WebViewClient`, `WebChromeClient`, `evaluateJavascript`,
+  `addJavascriptInterface` (a synchronous call, as on a device),
+  `CookieManager`, `loadData` and `loadDataWithBaseURL`.
 - Cookies and storage are the app's own, in `app_webview2` in its data
-  directory, kept between runs.
+  directory, kept between runs; the browser tab has a profile of its own
+  there.
 
 For tests, `WINAPK_HEADLESS=1` runs without a window,
 `WINAPK_HEADLESS_FRAME=frame.bmp` saves the last frame the app drew, and
@@ -168,13 +175,13 @@ Done so far:
   EGL window surfaces), plus libandroid's assets.
 - The app library (`Win.apk.exe`) with shortcuts per app, the installer
   (`package/winapk.iss`) and the release workflow.
-- WebView2 for Custom Tabs and Trusted Web Activities: sign-in pages whose
-  callback returns to the app.
+- WebView2: `android.webkit.WebView`, and a browser tab for Custom Tabs and
+  Trusted Web Activities whose sign-in callbacks return to the app.
 
 Next, in order: OpenSL ES and AAudio for native sound, `NativeActivity`,
-`NativeMedia` (MediaPlayer and video on Media Foundation), WebView2 behind
-`android.webkit.WebView`, the camera and location, signals through vectored
-exception handling, then the launcher (M8) and ARM translation (D8).
+`NativeMedia` (MediaPlayer and video on Media Foundation), the camera and
+location, signals through vectored exception handling, then the launcher (M8)
+and ARM translation (D8).
 
 `PORTING.md` holds the design decisions, the technical findings, the known
 gaps, and the milestone plan up to a production release.
@@ -235,6 +242,11 @@ Windows hook is unavoidable, and every such change is listed here:
   browser tab of its own, and the host browser row then answers the Custom Tabs
   service; its PackageInfo carries `signingInfo`. On the Mac, which has no such
   tab, nothing changes but the `signingInfo`.
+- `runtime/java/android/webkit/WebView.java`: with a modal window above a
+  WebView, the occluder rects sent to the engine add that window's bounds
+  after the whole-view rect, so an engine that shows the page over the canvas
+  (Windows) can keep the dialog visible. The union, which the Mac's hit test
+  uses, is unchanged.
 
 ## License
 
