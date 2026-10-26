@@ -5,6 +5,7 @@
 #   <out>/bin/winapk-runtime.exe
 #   <out>/bin/macapk-translator.exe, winapk-guest-stub.dll (app native libraries)
 #   <out>/bin/libEGL.dll, libGLESv2.dll, ... (ANGLE, for GL; fetch_angle.sh)
+#   <out>/bin/WebView2Loader.dll      (WebView2, for web content; fetch_webview2.sh)
 #   <out>/bin/tools/framework-res.apk
 #   <out>/lib/*.jar, java_base_patch/, jdk_unsupported_patch/
 #
@@ -29,5 +30,6 @@ cp -f "$BUILD/Win.apk.exe" "$OUT/"
 # The tile an app without an icon gets in the library.
 cp -f "$HERE/../launcher/winapk.png" "$OUT/bin/"
 "$HERE/fetch_angle.sh" "$OUT/bin"
+"$HERE/fetch_webview2.sh" "$OUT/bin"
 rm -rf "$OUT/.build"  # build_java.sh's scratch, not part of the runtime
 echo "[stage] runtime staged in $OUT"

@@ -315,11 +315,32 @@ jboolean JNICALL Cocoa_openHostUrl(JNIEnv* env, jclass, jstring url) {
     return r > 32 ? JNI_TRUE : JNI_FALSE;
 }
 
-// Custom URL schemes for the app (OAuth redirects) need the scheme registered
-// and a running instance to forward to; until then the intake answers
-// "unavailable", which HostUrlIntake treats as no host routing.
+// URLs the host hands to this app, as upstream's kAEGetURL Apple Event queues
+// the ones the macOS browser sends: here, the ones the in-runtime browser tab
+// (native_browser_tab.cpp) does not load because the app's own manifest takes
+// them. queue_host_url adds one and rings HostUrlIntake.macapkOnHostUrl, whose
+// drain (on the app's main thread) takes them all from here and delivers each
+// as the browser's ACTION_VIEW intent. Custom URL schemes are not registered
+// with Windows, so nothing outside the runtime adds to this queue.
+std::mutex g_host_urls_lock;
+std::vector<std::wstring> g_host_urls;
+jclass g_intake_cls = nullptr;
+jmethodID g_intake_on_url = nullptr;
+
 jobjectArray JNICALL Cocoa_takeHostUrls(JNIEnv* env, jclass) {
-    return env->NewObjectArray(0, env->FindClass("java/lang/String"), nullptr);
+    std::vector<std::wstring> urls;
+    {
+        std::lock_guard<std::mutex> hold(g_host_urls_lock);
+        urls.swap(g_host_urls);
+    }
+    jclass string_cls = env->FindClass("java/lang/String");
+    jobjectArray out = env->NewObjectArray(static_cast<jsize>(urls.size()), string_cls, nullptr);
+    for (size_t i = 0; out && i < urls.size(); ++i) {
+        jstring s = env->NewString(reinterpret_cast<const jchar*>(urls[i].data()), static_cast<jsize>(urls[i].size()));
+        env->SetObjectArrayElement(out, static_cast<jsize>(i), s);
+        env->DeleteLocalRef(s);
+    }
+    return out;
 }
 jobjectArray JNICALL Cocoa_urlSchemeHandlers(JNIEnv*, jclass, jstring) { return nullptr; }
 jint JNICALL Cocoa_setUrlSchemeDefault(JNIEnv*, jclass, jstring, jstring) { return -1; }
@@ -1034,6 +1055,37 @@ HostMethods native_cocoa_methods() { return {kMethods, sizeof(kMethods) / sizeof
 void set_app_dir(const std::wstring& dir) {
     std::lock_guard<std::mutex> hold(g_icon_lock);
     g_icon_path = dir + L"\\icon.png";
+}
+
+void prepare_host_url_queue(JNIEnv* env) {
+    std::lock_guard<std::mutex> hold(g_host_urls_lock);
+    if (g_intake_cls) return;
+    jclass cls = env->FindClass("com/macapk/loader/HostUrlIntake");
+    if (cls) {
+        g_intake_on_url = env->GetStaticMethodID(cls, "macapkOnHostUrl", "()V");
+        if (g_intake_on_url) g_intake_cls = static_cast<jclass>(env->NewGlobalRef(cls));
+        env->DeleteLocalRef(cls);
+    }
+    if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+    }
+}
+
+void queue_host_url(JNIEnv* env, const std::wstring& url) {
+    jclass cls = nullptr;
+    {
+        std::lock_guard<std::mutex> hold(g_host_urls_lock);
+        g_host_urls.push_back(url);
+        cls = g_intake_cls;
+    }
+    if (!env || !cls) return;
+    env->CallStaticVoidMethod(cls, g_intake_on_url);
+    if (env->ExceptionCheck()) {
+        std::fprintf(stderr, "[win.apk] exception in HostUrlIntake.macapkOnHostUrl:\n");
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+    }
 }
 
 }  // namespace winapk::host
