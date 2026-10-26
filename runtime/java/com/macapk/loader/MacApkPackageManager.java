@@ -182,7 +182,9 @@ public final class MacApkPackageManager extends PackageManager {
         // This is NOT a fabricated app: we really can open the URL, via
         // NSWorkspace. It advertises no capability we cannot honour -- note
         // resolveService stays null for CustomTabsService, which is what makes
-        // AppAuth set useCustomTab=false and fall back to plain ACTION_VIEW.
+        // AppAuth set useCustomTab=false and fall back to plain ACTION_VIEW --
+        // unless the runtime shows browser tabs itself (HostBrowserTab: a
+        // WebView2 window on Windows), where it answers HostCustomTabsService.
         if (MACAPK_HOST_PACKAGE.equals(packageName)) {
             PackageInfo hi = new PackageInfo();
             hi.packageName = MACAPK_HOST_PACKAGE;
@@ -192,6 +194,10 @@ public final class MacApkPackageManager extends PackageManager {
             hi.signatures = new android.content.pm.Signature[] {
                 new android.content.pm.Signature(new byte[0])
             };
+            // API 28+ callers read signingInfo instead (GET_SIGNING_CERTIFICATES):
+            // androidx.browser's Token.create(<browser>) for a TWA, Spotify's
+            // challenge launcher among them, dereferences it unchecked.
+            hi.signingInfo = new android.content.pm.SigningInfo(hi.signatures);
             android.content.pm.ApplicationInfo hai =
                 new android.content.pm.ApplicationInfo();
             hai.packageName = MACAPK_HOST_PACKAGE;
@@ -5809,6 +5815,7 @@ public final class MacApkPackageManager extends PackageManager {
         if (ri == null) ri = macapkResolveGmsMeasurementService(intent);
         if (ri == null) ri = macapkResolveGmsIdentityService(intent);
         if (ri == null) ri = macapkResolveGmsLocationService(intent);
+        if (ri == null) ri = macapkResolveCustomTabsService(intent);
         if (ri != null) out.add(ri);
         if (intent == null) return out;
 
@@ -5897,6 +5904,7 @@ public final class MacApkPackageManager extends PackageManager {
         if (ri == null) ri = macapkResolveGmsMeasurementService(intent);
         if (ri == null) ri = macapkResolveGmsIdentityService(intent);
         if (ri == null) ri = macapkResolveGmsLocationService(intent);
+        if (ri == null) ri = macapkResolveCustomTabsService(intent);
         if (ri != null) return ri;
         // Fall through to the hosted package's own services (v1.0.1177). This
         // is the call firebase-messaging's ServiceStarter makes to locate the
@@ -5906,6 +5914,39 @@ public final class MacApkPackageManager extends PackageManager {
         // filter matcher activities and receivers use.
         List<ResolveInfo> all = queryIntentServices(intent, flags);
         return all.isEmpty() ? null : all.get(0);
+    }
+
+    /** The host browser row's Custom Tabs service (HostCustomTabsService),
+     *  only where the runtime shows browser tabs itself. Matches the action,
+     *  and the package or component when the caller names one, like the
+     *  licensing service below. The filter (GET_RESOLVED_FILTER) carries the
+     *  action alone: no TrustedWebActivities category, so a TWA launcher uses
+     *  Custom Tab mode. */
+    private ResolveInfo macapkResolveCustomTabsService(Intent intent) {
+        if (intent == null || !HostCustomTabsService.ACTION.equals(intent.getAction())) return null;
+        String want = intent.getPackage();
+        if (want != null && !MACAPK_HOST_PACKAGE.equals(want)) return null;
+        ComponentName explicit = intent.getComponent();
+        if (explicit != null && !MACAPK_HOST_PACKAGE.equals(explicit.getPackageName())) return null;
+        if (!HostBrowserTab.available()) return null;
+        android.content.pm.ServiceInfo si = new android.content.pm.ServiceInfo();
+        si.packageName = MACAPK_HOST_PACKAGE;
+        si.name = HostCustomTabsService.class.getName();
+        si.exported = true;
+        si.enabled = true;
+        android.content.pm.ApplicationInfo app = new android.content.pm.ApplicationInfo();
+        app.packageName = MACAPK_HOST_PACKAGE;
+        app.enabled = true;
+        si.applicationInfo = app;
+        android.content.IntentFilter f = new android.content.IntentFilter();
+        f.addAction(HostCustomTabsService.ACTION);
+        ResolveInfo ri = new ResolveInfo();
+        ri.serviceInfo = si;
+        ri.filter = f;
+        ri.resolvePackageName = MACAPK_HOST_PACKAGE;
+        ri.isDefault = true;
+        ri.match = android.content.IntentFilter.MATCH_CATEGORY_EMPTY;
+        return ri;
     }
 
     /** The one implicit service Intent Mac.apk can answer. Matches on ACTION

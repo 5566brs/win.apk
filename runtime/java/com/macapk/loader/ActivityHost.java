@@ -2310,7 +2310,7 @@ public final class ActivityHost {
         String target = (act.kind == HostAction.Kind.SHARE_TEXT)
                       ? shareTextUrl(real) : act.url;
         if (target == null) return false;
-        return openHost(target, real.getAction());
+        return openHost(target, real.getAction(), real);
     }
 
     /**
@@ -2701,10 +2701,14 @@ public final class ActivityHost {
      *  ActivityHost's implicit-intent resolution and URLSpan.onClick both do.
      *  Package-visible so framework shims reach it via this loader class. */
     public static boolean openHostUrlGated(String uri, String why) {
-        return openHost(uri, why);
+        return openHost(uri, why, null);
     }
 
-    private static boolean openHost(String uri, String action) {
+    /** `intent`: the intent being performed, when there is one (a URLSpan tap
+     *  has none). A Custom Tab or TWA launch of a web URL opens in the
+     *  runtime's own browser tab where the host has one (HostBrowserTab),
+     *  after the same two policy gates; everything else goes to the host. */
+    private static boolean openHost(String uri, String action, Intent intent) {
         if (uri == null) return false;
         // v1.0.822 (revised v1.0.849, see hostUrlGraceMs above): a host-URL
         // open must be USER-INITIATED. Original motivation stands: Simon
@@ -2748,6 +2752,19 @@ public final class ActivityHost {
                 return false;
             }
         }
+        // The runtime's own browser tab: not a host open, so neither the dry
+        // run below nor a redirect-scheme claim applies (the tab returns the
+        // redirect to this app itself).
+        if (intent != null && HostBrowserTab.handles(uri, intent) && HostBrowserTab.open(uri, intent)) {
+            NativeLog.i(TAG, "implicit intent " + action + " (Custom Tab) -> browser tab("
+                    + HostUrlIntake.redact(uri) + ")");
+            return true;
+        }
+        return openHostNow(uri, action, claim);
+    }
+
+    /** The host open itself, past the policy gates. */
+    static boolean openHostNow(String uri, String action, boolean claim) {
         if (hostUrlDryRun()) {
             // Test hook: everything up to the host call ran (resolution, both
             // policy gates), and the open is reported as done so the app goes
