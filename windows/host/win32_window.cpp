@@ -361,6 +361,15 @@ void send_key(int action, WPARAM vk, LPARAM lp) {
     g_input->key(action, code, ch, meta);
 }
 
+// Whether the foreground window is one of this process's (the app window, a
+// browser tab, a dialog), i.e. whether the user is in the app right now.
+bool foreground_is_ours() {
+    HWND fg = GetForegroundWindow();
+    DWORD pid = 0;
+    if (fg) GetWindowThreadProcessId(fg, &pid);
+    return fg && pid == GetCurrentProcessId();
+}
+
 LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_PAINT:
@@ -451,11 +460,28 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_DISPLAYCHANGE:
             refit(hwnd);
             break;
-        case kMsgShow:
-            ShowWindow(hwnd, SW_SHOWNORMAL);
-            SetForegroundWindow(hwnd);
+        // The first show takes the foreground (the user just started the
+        // app); later ones -- an activity starting, the task coming to the
+        // front -- only from a window of this process. A WebView2 in the
+        // process (webview2_host.h) lets it take the foreground from any
+        // program, and an app must not pull the user out of another one
+        // because a page redirected or an intent arrived.
+        case kMsgShow: {
+            static bool shown = false;
+            if (!shown || foreground_is_ours()) {
+                ShowWindow(hwnd, SW_SHOWNORMAL);
+                SetForegroundWindow(hwnd);
+            } else if (!IsWindowVisible(hwnd)) {
+                ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            }
+            shown = true;
             return 0;
+        }
         case kMsgShowState:
+            if (wp == SW_RESTORE && !foreground_is_ours()) {
+                ShowWindow(hwnd, IsIconic(hwnd) ? SW_SHOWNOACTIVATE : SW_SHOWNA);
+                return 0;
+            }
             ShowWindow(hwnd, static_cast<int>(wp));
             if (wp == SW_RESTORE) SetForegroundWindow(hwnd);
             return 0;
