@@ -400,8 +400,9 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 1;  // paint covers the whole client area
         case WM_LBUTTONDOWN:
             // A click on the app's own pixels takes the keyboard back from a
-            // WebView placed in the window (native_webview.cpp).
-            if (GetFocus() != hwnd) SetFocus(hwnd);
+            // WebView placed in the window (native_webview.cpp). Only in the
+            // active window: SetFocus would activate an inactive one.
+            if (GetActiveWindow() == hwnd && GetFocus() != hwnd) SetFocus(hwnd);
             SetCapture(hwnd);
             g_pointer_down = true;
             send_pointer(hwnd, 0, lp);
