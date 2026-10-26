@@ -458,6 +458,13 @@ Java_com_macapk_loader_NativeSqlite_nativeOpen(JNIEnv* env, jclass,
     // AOSP registers these from nativeOpen before the connection is handed out,
     // so every statement compiled on it can name them.
     register_android_sqlite(db);
+    // AOSP android_database_SQLiteConnection.cpp nativeOpen: "Set the default
+    // busy handler to retry automatically before returning SQLITE_BUSY", with
+    // BUSY_TIMEOUT_MS = 2500. Without it a second connection to the same file
+    // (another SQLiteDatabase on the path) failed at once with "database is
+    // locked": in DELETE journal mode (below) a COMMIT needs every other
+    // connection's read lock gone, and Spotify's messages.db COMMIT died that way.
+    sqlite3_busy_timeout(db, 2500);
     sqlite3_exec(db, "PRAGMA cache_size=-2048", nullptr, nullptr, nullptr);
     // Journal mode: DELETE by default, NOT WAL. WAL maintains an mmap'd `-shm`
     // shared-memory index; in this process (alongside the JVM heap + ANGLE +
