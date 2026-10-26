@@ -4710,16 +4710,11 @@ public final class ActivityHost {
                     if (tagVal == null) continue;
                     // The ViewTreeLifecycleOwner tag value is a LifecycleOwner;
                     // it may BE a registry, or HOLD one in a field.
-                    if (isLifecycleRegistryShaped(tagVal.getClass(), eventCls, stateCls)
-                        && drivenRegs.put(tagVal, Boolean.TRUE) == null
-                        && sRegistriesDrivenToResumed.put(tagVal, Boolean.TRUE) == null) {
-                        driveRegistryToResumed(tagVal, eventCls, events);
+                    if (isLifecycleRegistryShaped(tagVal.getClass(), eventCls, stateCls)) {
+                        driveViewTreeRegistry(tagVal, eventCls, stateCls, events, drivenRegs);
                     }
                     for (Object reg : findLifecycleRegistries(tagVal, eventCls, stateCls)) {
-                        if (drivenRegs.put(reg, Boolean.TRUE) == null
-                            && sRegistriesDrivenToResumed.put(reg, Boolean.TRUE) == null) {
-                            driveRegistryToResumed(reg, eventCls, events);
-                        }
+                        driveViewTreeRegistry(reg, eventCls, stateCls, events, drivenRegs);
                     }
                 }
                 if (v instanceof android.view.ViewGroup) {
@@ -4743,6 +4738,58 @@ public final class ActivityHost {
         // except for the views that were waiting on an owner.
         try { android.view.View.macapkRetryComposeAttaches(); }
         catch (Throwable t) { NativeLog.w(TAG, "compose-attach retry: " + t); }
+    }
+
+    /** One view-tree registry: finish the move to RESUMED of an owner that has
+     *  started its lifecycle, once. An owner still at INITIALIZED has not
+     *  created it yet, and nothing outside the owner moves it on a device: it is
+     *  holding its lifecycle back on purpose. Spotify's main activity tags its
+     *  root view with the lifecycle of the fragment manager it attaches only
+     *  once the signed-in session is up; driving that one to RESUMED here ran
+     *  the manager's dispatchCreate with no host attached (NPE in the app's
+     *  FragmentController) and routed the launch intent before the session
+     *  existed. Such a registry is left alone and looked at again on the next
+     *  drive. A state that cannot be read keeps the old behaviour. */
+    private static void driveViewTreeRegistry(Object reg, Class<?> eventCls, Class<?> stateCls,
+                                              Object[] events,
+                                              java.util.IdentityHashMap<Object,Boolean> drivenRegs) {
+        if (drivenRegs.put(reg, Boolean.TRUE) != null) return;
+        int state = registryStateOrdinal(reg, stateCls);
+        if (state >= 0 && state <= STATE_INITIALIZED) {
+            if (LC_TRACE) NativeLog.i(TAG, "view-tree lifecycle: " + reg.getClass().getName()
+                + " not started by its owner (state " + state + "); left alone");
+            return;
+        }
+        if (sRegistriesDrivenToResumed.put(reg, Boolean.TRUE) == null) {
+            driveRegistryToResumed(reg, eventCls, events);
+        }
+    }
+
+    /** Lifecycle.State's AOSP declaration order: DESTROYED, INITIALIZED, CREATED, STARTED, RESUMED. */
+    private static final int STATE_INITIALIZED = 1;
+
+    /** A registry's current Lifecycle.State ordinal, or -1. Read through its
+     *  no-arg method returning the State class (getCurrentState(), renamed by
+     *  R8), else its State-typed field. Side-effect free. */
+    private static int registryStateOrdinal(Object reg, Class<?> stateCls) {
+        try {
+            for (Method m : reg.getClass().getMethods()) {
+                if (m.getParameterCount() != 0 || m.getReturnType() != stateCls
+                    || java.lang.reflect.Modifier.isStatic(m.getModifiers())) continue;
+                m.setAccessible(true);
+                Object s = m.invoke(reg);
+                if (s instanceof Enum) return ((Enum<?>) s).ordinal();
+            }
+            for (Class<?> c = reg.getClass(); c != null && c != Object.class; c = c.getSuperclass()) {
+                for (java.lang.reflect.Field f : c.getDeclaredFields()) {
+                    if (f.getType() != stateCls || java.lang.reflect.Modifier.isStatic(f.getModifiers())) continue;
+                    f.setAccessible(true);
+                    Object s = f.get(reg);
+                    if (s instanceof Enum) return ((Enum<?>) s).ordinal();
+                }
+            }
+        } catch (Throwable ignored) { }
+        return -1;
     }
 
     /** The post-onCreate window slot of the launch burst. AOSP has no window
