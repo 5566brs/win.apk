@@ -370,6 +370,27 @@ bool foreground_is_ours() {
     return fg && pid == GetCurrentProcessId();
 }
 
+// The process was started with a show command that does not activate
+// (STARTF_USESHOWWINDOW with SW_SHOWNOACTIVATE, SW_SHOWNA or a minimized one):
+// its first window is shown without taking the foreground, as Windows' own
+// first-ShowWindow rule does for a program that passes the command through.
+bool started_without_activation() {
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    GetStartupInfoW(&si);
+    if (!(si.dwFlags & STARTF_USESHOWWINDOW)) return false;
+    switch (si.wShowWindow) {
+        case SW_SHOWNOACTIVATE:
+        case SW_SHOWNA:
+        case SW_SHOWMINNOACTIVE:
+        case SW_SHOWMINIMIZED:
+        case SW_MINIMIZE:
+            return true;
+        default:
+            return false;
+    }
+}
+
 LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_PAINT:
@@ -461,20 +482,22 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             refit(hwnd);
             break;
         // The first show takes the foreground (the user just started the
-        // app); later ones -- an activity starting, the task coming to the
-        // front -- only from a window of this process. A WebView2 in the
-        // process (webview2_host.h) lets it take the foreground from any
-        // program, and an app must not pull the user out of another one
-        // because a page redirected or an intent arrived.
+        // app), unless whoever started the process asked for no activation;
+        // later ones -- an activity starting, the task coming to the front --
+        // only from a window of this process. A WebView2 in the process
+        // (webview2_host.h) lets it take the foreground from any program,
+        // and an app must not pull the user out of another one because a
+        // page redirected or an intent arrived.
         case kMsgShow: {
             static bool shown = false;
-            if (!shown || foreground_is_ours()) {
+            const bool first = !shown;
+            shown = true;
+            if ((first && !started_without_activation()) || (!first && foreground_is_ours())) {
                 ShowWindow(hwnd, SW_SHOWNORMAL);
                 SetForegroundWindow(hwnd);
             } else if (!IsWindowVisible(hwnd)) {
                 ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             }
-            shown = true;
             return 0;
         }
         case kMsgShowState:
