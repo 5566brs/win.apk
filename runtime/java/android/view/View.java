@@ -812,10 +812,18 @@ public class View implements android.graphics.drawable.Drawable.Callback,
         // Key learned structurally via setTag rather than from the table (so we
         // have no interface name for it): unchanged behaviour.
         if (iface == null) return true;
+        ClassLoader cl = owner.getClass().getClassLoader();
+        java.util.Set<String> missing;
+        synchronized (sOwnerIfaceMissing) {
+            missing = sOwnerIfaceMissing.computeIfAbsent(cl,
+                k -> java.util.concurrent.ConcurrentHashMap.newKeySet());
+        }
+        if (missing.contains(iface)) return true;  // renamed: looked up once
         Class<?> ic;
         try {
-            ic = Class.forName(iface, false, owner.getClass().getClassLoader());
+            ic = Class.forName(iface, false, cl);
         } catch (Throwable renamedOrAbsent) {
+            missing.add(iface);
             return true; // cannot decide; see the R8 note above
         }
         if (ic.isInstance(owner)) return true;
@@ -855,6 +863,11 @@ public class View implements android.graphics.drawable.Drawable.Callback,
         new java.util.concurrent.ConcurrentHashMap<>();
     private static final java.util.Set<Integer> sOwnerRefusedKeys =
         java.util.Collections.synchronizedSet(new java.util.HashSet<Integer>());
+    /** Per loader, the owner interface names it cannot resolve (an R8-renamed
+     *  app). getTag(ownerKey) runs per frame, and each miss was a Class.forName
+     *  plus a ClassNotFound log line. */
+    private static final java.util.Map<ClassLoader, java.util.Set<String>> sOwnerIfaceMissing =
+        new java.util.WeakHashMap<>();
     private static final boolean OWNER_TRACE = System.getenv("MACAPK_OWNER_TRACE") != null;
     private static boolean sWarnedOwnerFallback = false;
     /** THE androidx view-tree owner families. This table is the SINGLE place any
@@ -1150,9 +1163,11 @@ public class View implements android.graphics.drawable.Drawable.Callback,
     private static final java.util.Map<Class<?>, Boolean> sOwnerTagClassCache =
         new java.util.concurrent.ConcurrentHashMap<>();
     private static volatile Class<?> sLifecycleStateCls = null;
-    /** Resolve androidx.lifecycle.Lifecycle$State rename-proof. Cache SUCCESS only
-     *  (never a permanent failure -- the class may not be loaded yet). Try the
-     *  value's classloader, then the current activity's (the app classloader). */
+    /** Resolve androidx.lifecycle.Lifecycle$State rename-proof. The class is
+     *  cached once found; a miss is remembered only per loader (a framework
+     *  view's loader cannot see androidx, but the app's loader, tried next, may
+     *  -- so a miss is never cached as a global answer). Try the value's
+     *  classloader, then the current activity's (the app classloader). */
     private static Class<?> lifecycleStateClass(ClassLoader cl) {
         Class<?> c = sLifecycleStateCls;
         if (c != null) return c;
@@ -1167,10 +1182,18 @@ public class View implements android.graphics.drawable.Drawable.Callback,
         return c;
     }
     private static Class<?> tryLoadLifecycleState(ClassLoader cl) {
-        if (cl == null) return null;
+        if (cl == null || sNoLifecycleStateName.containsKey(cl)) return null;
         try { return Class.forName("androidx.lifecycle.Lifecycle$State", false, cl); }
-        catch (Throwable t) { return null; }
+        catch (Throwable t) {
+            // A loader that cannot find the name now never will (R8 renamed it,
+            // as in Spotify): remember that per loader, or every setTag and
+            // owner-key getTag repeats the lookup and its ClassNotFound line.
+            sNoLifecycleStateName.put(cl, Boolean.TRUE);
+            return null;
+        }
     }
+    private static final java.util.Map<ClassLoader, Boolean> sNoLifecycleStateName =
+        java.util.Collections.synchronizedMap(new java.util.WeakHashMap<ClassLoader, Boolean>());
     private static boolean returnsLifecycleState(Class<?> t, Class<?> stateCls) {
         if (t == null || t.isPrimitive() || t == Object.class) return false;
         try {
