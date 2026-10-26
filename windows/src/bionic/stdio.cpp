@@ -523,7 +523,15 @@ WINAPK_GUEST_ABI char* g_getcwd(char* buf, size_t n) {
         fail_crt();
         return nullptr;
     }
-    const std::string s = narrow(w);
+    // POSIX code takes a directory that does not start with '/' for a relative
+    // one and resolves it against getcwd() again: JUCE's File did that until
+    // the stack overflowed (Spotify's libcomScore). So the directory is rooted,
+    // "/C:/dir", which host_path() reads back as "C:/dir".
+    std::string s = narrow(w);
+    for (char& c : s) {
+        if (c == '\\') c = '/';
+    }
+    if (s[0] != '/') s.insert(0, 1, '/');
     if (!buf) return _strdup(s.c_str());
     if (s.size() + 1 > n) {
         *guest_errno() = kERANGE;

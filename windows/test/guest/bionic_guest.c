@@ -64,6 +64,8 @@ off_t lseek(int, off_t, int);
 int unlink(const char*);
 int mkdir(const char*, unsigned);
 int rmdir(const char*);
+char* getcwd(char*, size_t);
+int chdir(const char*);
 struct stat { unsigned long dev, ino, nlink; unsigned mode, uid, gid; int pad; unsigned long rdev;
               long size, blksize, blocks, atime, atime_ns, mtime, mtime_ns, ctime, ctime_ns, unused[3]; };
 int stat(const char*, struct stat*);
@@ -494,6 +496,17 @@ static void test_files(const char* dir) {
     const int nfd = open("/dev/null", 01);
     check("/dev/null accepts writes", nfd >= 0 && write(nfd, "x", 1) == 1, 0);
     if (nfd >= 0) close(nfd);
+    // The working directory is rooted, as POSIX code expects (it resolves any
+    // other answer against getcwd() again), and chdir takes it back.
+    char cwd[1024];
+    check("getcwd is rooted, with '/' separators",
+          getcwd(cwd, sizeof cwd) == cwd && cwd[0] == '/' && !strchr(cwd, '\\'), cwd);
+    check("chdir takes getcwd's answer", chdir(cwd) == 0, 0);
+    snprintf(path, sizeof path, "%s/cwd_probe.txt", cwd);
+    f = fopen(path, "w");
+    if (f) fclose(f);
+    check("a path under getcwd's answer opens", f != 0 && stat(path, &st) == 0, path);
+    unlink(path);
 }
 
 // ---- zlib (libz.so) ---------------------------------------------------------------
