@@ -4997,9 +4997,15 @@ public class View implements android.graphics.drawable.Drawable.Callback,
             onMeasure(wSpec, hSpec);
         } catch (Throwable t) {
             if (warnedMeasureThrowClasses.add(getClass().getName())) {
+                // The specs and where the throw came from: logged once per class,
+                // this line is all there is to go on afterwards.
+                StringBuilder where = new StringBuilder();
+                StackTraceElement[] st = t.getStackTrace();
+                for (int i = 0; i < st.length && i < 16; i++) where.append("\n\tat ").append(st[i]);
                 com.macapk.loader.NativeLog.w("View",
                     "onMeasure threw on " + getClass().getName() + ": " + t
-                    + " -- measuring as " + w + "x" + h + ", tree continues");
+                    + " -- measuring as " + w + "x" + h + " (" + MeasureSpec.toString(wSpec)
+                    + ", " + MeasureSpec.toString(hSpec) + "), tree continues" + where);
             }
             // A ComposeView that threw because its owner wasn't reachable should
             // retry composition creation on a later pass; queue it.
