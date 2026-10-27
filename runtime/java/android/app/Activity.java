@@ -1608,10 +1608,12 @@ public class Activity extends ContextThemeWrapper
 
         /** The @android:id/content frame when the installed root is the decor
          *  ensureDecor BUILT and it is still this window's decor (the empty
-         *  window ActivityHost.addEmptyWindowIfNeeded installs), else null. An
-         *  AppCompat sub-decor replaces `decor`, so it never matches. */
+         *  window ActivityHost.addEmptyWindowIfNeeded installs), else null. Not
+         *  once AppCompat's sub-decor sits in it: AppCompat moves the id to its
+         *  own content frame, which findViewById then finds in the tree. */
         android.view.View macapkOwnDecorContentFor(android.view.View installedRoot) {
-            return (installedRoot != null && installedRoot == builtDecor && decor == builtDecor)
+            return (installedRoot != null && installedRoot == builtDecor && decor == builtDecor
+                    && content != null && content.getId() == ID_CONTENT)
                     ? content : null;
         }
 
@@ -2042,10 +2044,38 @@ public class Activity extends ContextThemeWrapper
                 activity.macapkInstallContentDirect(view);
                 return;
             }
-            // AppCompat's `mWindow.setContentView(subDecor)` happens at
-            // the end of createSubDecor after it has already done the
-            // id-aliasing on subDecor. We make this view the new "decor"
-            // so applyFixedSizeWindow's `mSubDecor.findViewById(16908290)`
+            // AOSP PhoneWindow.setContentView(View) (:486-506) puts the view
+            // INTO the content frame, MATCH x MATCH, and the decor stays the
+            // window's root. AppCompat's createSubDecor ends in
+            // `mWindow.setContentView(subDecor)`, and we used to make the
+            // sub-decor itself the decor and the render root -- a vertical
+            // LinearLayout. A view an app adds to getDecorView() to float
+            // over everything then landed below the content, 0 px tall:
+            // Spotify's bottom sheets did, and the screen stopped answering
+            // touches under a sheet nobody could see. The decor is the root
+            // now, with the sub-decor in its content frame; findViewById
+            // still reaches the sub-decor's android.R.id.content (AppCompat
+            // took the id off ours). A view carrying a native surface keeps
+            // the bare install, as the screen_title decor does.
+            if (view != null && view != builtDecor && decor == builtDecor
+                    && findNativeHandle(view) == 0) {
+                try {
+                    android.view.ViewGroup frame = (android.view.ViewGroup) content;
+                    if (view.getParent() != frame) {
+                        frame.removeAllViews();
+                        frame.addView(view, new android.view.ViewGroup.LayoutParams(
+                                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                                android.view.ViewGroup.LayoutParams.MATCH_PARENT));
+                    }
+                    activity.macapkInstallContentDirect(builtDecor);
+                    return;
+                } catch (Throwable t) {
+                    com.macapk.loader.NativeLog.w("Mac.apk.Activity",
+                            "content install into the decor failed, installing the view bare: " + t);
+                }
+            }
+            // The bare install: this view becomes the "decor", so
+            // applyFixedSizeWindow's `mSubDecor.findViewById(16908290)`
             // routes through this view's tree.
             decor = view;
             // Route the view to native rendering DIRECTLY -- NOT through
@@ -2765,7 +2795,12 @@ public class Activity extends ContextThemeWrapper
                 View own = (w instanceof ActivityWindow aw) ? aw.macapkOwnDecorContentFor(contentView) : null;
                 if (own != null) return own;
             }
-            if (contentView != null) return contentView;
+            if (contentView != null) {
+                // The window's decor is the root with a sub-decor in it: the id
+                // is on the sub-decor's content frame (PhoneWindow.findViewById).
+                View inTree = contentView.findViewById(id);
+                return inTree != null ? inTree : contentView;
+            }
             View dc = getWindow().getDecorView();   // ensureDecor() -> content FrameLayout
             return dc != null ? dc.findViewById(id) : null;
         }
