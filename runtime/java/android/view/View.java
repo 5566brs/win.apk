@@ -4067,8 +4067,38 @@ public class View implements android.graphics.drawable.Drawable.Callback,
     private OnKeyListener onKeyListener;
     public void setOnKeyListener(OnKeyListener l) { this.onKeyListener = l; }
 
-    public void transformMatrixToLocal(android.graphics.Matrix matrix) {}
-    public void transformMatrixToGlobal(android.graphics.Matrix matrix) {}
+    /** AOSP View.transformMatrixToGlobal (android16-release View.java): the
+     *  parent's mapping, then the parent's scroll, then this view's position
+     *  and its own transform -- the matrix form of transformFromViewToWindowSpace.
+     *  The root adds nothing: window space is screen space here (the same
+     *  identity getLocationOnScreen relies on). These were no-ops, and androidx
+     *  Compose builds its view-to-window matrix from exactly this call
+     *  (CalculateMatrixToWindowApi29), so positionInWindow / boundsInWindow of
+     *  anything in a ComposeView not at the window origin came back relative to
+     *  that ComposeView -- e.g. an anchor in a bottom bar read y=0, not its
+     *  window y. Touch was unaffected: Compose re-derives its window offset
+     *  from each MotionEvent's raw-minus-local. */
+    public void transformMatrixToGlobal(android.graphics.Matrix matrix) {
+        final ViewParent p = getParent();
+        if (p instanceof View) {
+            final View vp = (View) p;
+            vp.transformMatrixToGlobal(matrix);
+            matrix.preTranslate(-vp.getScrollX(), -vp.getScrollY());
+        }
+        matrix.preTranslate(getLeft(), getTop());
+        if (macapkHasAnyTransform() && !hasIdentityMatrix()) matrix.preConcat(getMatrix());
+    }
+    /** AOSP View.transformMatrixToLocal: the inverse walk of the above. */
+    public void transformMatrixToLocal(android.graphics.Matrix matrix) {
+        final ViewParent p = getParent();
+        if (p instanceof View) {
+            final View vp = (View) p;
+            vp.transformMatrixToLocal(matrix);
+            matrix.postTranslate(vp.getScrollX(), vp.getScrollY());
+        }
+        matrix.postTranslate(-getLeft(), -getTop());
+        if (macapkHasAnyTransform() && !hasIdentityMatrix()) matrix.postConcat(getInverseMatrix());
+    }
 
     public void buildLayer() {}
 
