@@ -2631,8 +2631,20 @@ public class LayoutInflater {
             case "Toolbar":
             case "ActionBar":
             case "ActionBarContainer":
+                minH = 112;
+                break;
             case "AppBarLayout":
             case "CollapsingToolbarLayout":
+                // Pure containers: AOSP measures a real one to its children
+                // (CollapsingToolbarLayout.onMeasure adopts its Toolbar's height
+                // as the minimum itself) and neither default style declares a
+                // minHeight -- the View ctor read above supplies one if an app
+                // style does. A floor on a REAL instance put a toolbar-tall empty
+                // band over whatever short content the app keeps there: Spotify's
+                // home CollapsingToolbarLayout holds only a 0dp spacer, so it
+                // measured 56dp and pushed the filter-chip header down by that
+                // much. Placeholders keep the floor.
+                if (!tintAllowed) break;
                 minH = 112;
                 break;
             case "TabLayout":
