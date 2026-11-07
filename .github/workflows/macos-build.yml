@@ -18,6 +18,13 @@ run-name: "Mac.apk build ${{ inputs.repo }}@${{ inputs.ref }}"
 # [versionCode]" picks another app). The run fails only when the runtime dies
 # at launch or never opens a window; how well the app draws is for a person to
 # judge from the screenshots.
+#
+# -f apk_url=<url> runs that APK instead of an F-Droid app (app_package is then
+# only the run's label; -f apk_sha256 pins the download). -f run_args passes
+# extra arguments to macapk-runtime (e.g. --verbose). -f thread_dumps="60 180"
+# starts the JVM with its attach listener and saves a jcmd Thread.print of the
+# runtime at those seconds and once more before the workflow stops it, so a
+# hang shows where every thread waits.
 on:
   workflow_dispatch:
     inputs:
@@ -45,6 +52,22 @@ on:
         description: Seconds the app runs before the last screenshot
         required: false
         default: '90'
+      apk_url:
+        description: 'Direct APK URL to run instead of an F-Droid app (app_package is then only a label)'
+        required: false
+        default: ''
+      apk_sha256:
+        description: SHA-256 the apk_url download must match (empty skips the check)
+        required: false
+        default: ''
+      run_args:
+        description: 'Extra macapk-runtime arguments, e.g. --verbose'
+        required: false
+        default: ''
+      thread_dumps:
+        description: 'Seconds at which to save a jcmd thread dump, e.g. "60 180" (empty: none)'
+        required: false
+        default: ''
 
 # shell: bash makes GitHub run steps with -eo pipefail, so a failing build
 # piped through tee fails its step instead of showing green.
@@ -126,13 +149,36 @@ jobs:
       # F-Droid serves every current APK at /repo/<package>_<versionCode>.apk
       # and moves retired ones to /archive/; the API names the suggested
       # version when the input pins none.
-      - name: Fetch the app from F-Droid
+      - name: Fetch the app
         if: ${{ inputs.app }}
         env:
           APP_PACKAGE: ${{ inputs.app_package }}
+          APK_URL: ${{ inputs.apk_url }}
+          APK_SHA256: ${{ inputs.apk_sha256 }}
         run: |
           read -r pkg vc _ <<< "$APP_PACKAGE" || true
           [[ "$pkg" =~ ^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$ ]] || { echo "::error::bad package name '$pkg'"; exit 1; }
+          if [ -n "$APK_URL" ]; then
+            [[ "$APK_URL" =~ ^https:// ]] || { echo "::error::apk_url must be https"; exit 1; }
+            mkdir -p "$RUNNER_TEMP/apk"
+            apk="$RUNNER_TEMP/apk/${pkg}_${vc:-url}.apk"
+            curl -fSL --retry 3 -A 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130 Safari/537.36' \
+              -o "$apk" "$APK_URL" || { echo "::error::could not download $APK_URL"; exit 1; }
+            sum="$(shasum -a 256 "$apk" | cut -d' ' -f1)"
+            echo "Fetched $APK_URL ($(du -h "$apk" | cut -f1), sha256 $sum)"
+            if [ -n "$APK_SHA256" ] && [ "$sum" != "$APK_SHA256" ]; then
+              echo "::error::sha256 $sum does not match apk_sha256 $APK_SHA256"
+              exit 1
+            fi
+            unzip -l "$apk" | awk '$4 ~ /^lib\// { split($4, p, "/"); n[p[2]]++ } END { for (a in n) print "  native libraries: " n[a] " in lib/" a }'
+            {
+              echo "APP_PKG=$pkg"
+              echo "APP_VC=${vc:-url}"
+              echo "APP_APK=$apk"
+              echo "APP_URL=$APK_URL"
+            } >> "$GITHUB_ENV"
+            exit 0
+          fi
           if [ -z "${vc:-}" ]; then
             vc="$(curl -fsSL --retry 3 "https://f-droid.org/api/v1/packages/$pkg" \
                   | python3 -c 'import json, sys; print(json.load(sys.stdin)["suggestedVersionCode"])')"
@@ -170,12 +216,22 @@ jobs:
         if: ${{ inputs.app }}
         env:
           APP_SECONDS: ${{ inputs.app_seconds }}
+          RUN_ARGS: ${{ inputs.run_args }}
+          THREAD_DUMPS: ${{ inputs.thread_dumps }}
         run: |
           set +e
           out="$PWD/smoke"
           mkdir -p "$out"
           secs="${APP_SECONDS:-90}"
           [[ "$secs" =~ ^[0-9]+$ ]] || secs=90
+          read -r -a run_args <<< "$RUN_ARGS"
+          # Thread dumps: the runtime starts its JVM with -Xrs, so SIGQUIT does
+          # not dump; start the attach listener up front and use jcmd instead.
+          dumps=()
+          for d in $THREAD_DUMPS; do [[ "$d" =~ ^[0-9]+$ ]] && dumps+=("$d"); done
+          if [ ${#dumps[@]} -gt 0 ]; then
+            export MACAPK_JVM_OPTS="${MACAPK_JVM_OPTS:+$MACAPK_JVM_OPTS }-XX:+StartAttachListener"
+          fi
 
           # Lists windows with their owner pid and size. CGWindowList reports
           # those without Screen Recording permission; only titles need it.
@@ -214,8 +270,20 @@ jobs:
           mkdir -p "$root"
           echo "Running $APP_PKG $APP_VC for ${secs}s"
           t0=$(date +%s)
-          runtime/build/bin/macapk-runtime --apk "$APP_APK" --android-root "$root" > "$out/app.log" 2>&1 &
+          runtime/build/bin/macapk-runtime --apk "$APP_APK" --android-root "$root" "${run_args[@]}" > "$out/app.log" 2>&1 &
           pid=$!
+
+          # jcmd Thread.print of the runtime and every child that answers.
+          dump() {
+            local f="$out/threads-$1.txt" jp
+            : > "$f"
+            for jp in "$pid" $(pgrep -P "$pid"); do
+              echo "### jcmd $jp Thread.print -l ($1)" >> "$f"
+              "$JAVA_HOME/bin/jcmd" "$jp" Thread.print -l >> "$f" 2>&1
+            done
+            echo "Thread dump $1: $(grep -c '^"' "$f") threads"
+          }
+          di=0
 
           # Largest on-screen, normal-layer window owned by the runtime or a child.
           app_window() {
@@ -244,9 +312,14 @@ jobs:
               shot "$(printf '%03d' "$now")s"
               next_shot=$(( next_shot + 15 ))
             fi
+            if [ "$di" -lt ${#dumps[@]} ] && [ "$now" -ge "${dumps[$di]}" ]; then
+              dump "$(printf '%03d' "$now")s"
+              di=$(( di + 1 ))
+            fi
           done
           if [ "$alive" = 1 ]; then
             shot final
+            [ ${#dumps[@]} -gt 0 ] && dump final
             "$RUNNER_TEMP/winlist" > "$out/windows-after.txt"
             kill -TERM "$pid"
             for _ in $(seq 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
@@ -271,6 +344,12 @@ jobs:
           # "Exception" would also match the runtime's routine class probes
           # (ClassNotFoundException for pairip, Compose and AppCompat lookups).
           problems="$(grep -n -m 12 -E 'FATAL|threw|[Uu]ncaught|Exception in thread|^\[E\]|SIGSEGV|SIGBUS|SIGABRT|SIGILL|hs_err|Abort trap' "$out/app.log")"
+          # Where Android init got to: the runtime's boot clock milestones.
+          milestones="$(grep -E '\[boot-clock\]' "$out/app.log" | sed -E 's/^.*\[boot-clock\] //' | tail -8)"
+          # The Android main thread (Mac.apk names it "main") in the last dump.
+          last_dump="$(ls "$out"/threads-*.txt 2>/dev/null | tail -1)"
+          main_stack=""
+          [ -n "$last_dump" ] && main_stack="$(awk '/^"main"/ { p = 1 } p && /^$/ { p = 0; print "" } p' "$last_dump" | head -60)"
           fail=""
           [ "$alive" = 1 ] || fail="the runtime exited by itself after about ${now}s (status $rc)"
           [ -n "$first_win" ] || fail="${fail:+$fail; }no window appeared"
@@ -298,6 +377,20 @@ jobs:
             echo '```'
             echo "${problems:-(none)}"
             echo '```'
+            echo
+            echo "Last boot-clock milestones:"
+            echo
+            echo '```'
+            echo "${milestones:-(none)}"
+            echo '```'
+            if [ -n "$last_dump" ]; then
+              echo
+              echo "\"main\" threads in $(basename "$last_dump"):"
+              echo
+              echo '```'
+              echo "${main_stack:-(no thread named main; see the dump files)}"
+              echo '```'
+            fi
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
           if [ -n "$fail" ]; then
