@@ -24,7 +24,9 @@ run-name: "Mac.apk build ${{ inputs.repo }}@${{ inputs.ref }}"
 # extra arguments to macapk-runtime (e.g. --verbose). -f thread_dumps="60 180"
 # starts the JVM with its attach listener and saves a jcmd Thread.print of the
 # runtime at those seconds and once more before the workflow stops it, so a
-# hang shows where every thread waits.
+# hang shows where every thread waits. -f seed_files="<path> ..." creates those
+# empty files, relative to the run's android root, before the launch (state an
+# app expects from an earlier run, such as a consent marker).
 on:
   workflow_dispatch:
     inputs:
@@ -66,6 +68,10 @@ on:
         default: ''
       thread_dumps:
         description: 'Seconds at which to save a jcmd thread dump, e.g. "60 180" (empty: none)'
+        required: false
+        default: ''
+      seed_files:
+        description: 'Empty files to create under the android root before the launch, space-separated relative paths'
         required: false
         default: ''
 
@@ -218,6 +224,7 @@ jobs:
           APP_SECONDS: ${{ inputs.app_seconds }}
           RUN_ARGS: ${{ inputs.run_args }}
           THREAD_DUMPS: ${{ inputs.thread_dumps }}
+          SEED_FILES: ${{ inputs.seed_files }}
         run: |
           set +e
           out="$PWD/smoke"
@@ -268,6 +275,12 @@ jobs:
 
           root="$RUNNER_TEMP/android-root"
           mkdir -p "$root"
+          for f in $SEED_FILES; do
+            case "$f" in
+              /*|*..*) echo "::error::seed file '$f' must be a relative path inside the android root"; exit 1 ;;
+            esac
+            mkdir -p "$root/$(dirname "$f")" && : > "$root/$f" && echo "Seeded $f"
+          done
           echo "Running $APP_PKG $APP_VC for ${secs}s"
           t0=$(date +%s)
           runtime/build/bin/macapk-runtime --apk "$APP_APK" --android-root "$root" "${run_args[@]}" > "$out/app.log" 2>&1 &
