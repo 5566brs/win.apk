@@ -20,10 +20,14 @@
 #include "bionic_internal.h"
 
 #include <algorithm>
+#include <atomic>
 #include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
+#include <string>
+#include <thread>
 #include <vector>
 
 #include <winsock2.h>
@@ -112,6 +116,235 @@ void to_guest(const sockaddr_storage& addr, int len, void* guest, uint32_t* gues
     *guest_len = static_cast<uint32_t>(len);
 }
 
+// ---- the per-app proxy ----------------------------------------------------------------
+// WINAPK_PROXY=socks5://[user[:password]@]host:port is the launcher's per-app
+// proxy; Java code reaches it through socksProxyHost. An app's own network stack
+// in its .so (WhatsApp's chat socket) calls connect() here instead, so stream
+// connects to addresses outside this machine and the LAN go through the same
+// proxy. The proxy is asked for the address the guest resolved; UDP stays
+// direct. WINAPK_NATIVE_PROXY=0 turns this off.
+struct ProxyConfig {
+    sockaddr_storage addr{};
+    int addr_len = 0;
+    std::string user, password;
+};
+const ProxyConfig* proxy_config() {
+    static const ProxyConfig* const config = []() -> const ProxyConfig* {
+        const char* off = std::getenv("WINAPK_NATIVE_PROXY");
+        const char* v = std::getenv("WINAPK_PROXY");
+        if ((off && std::strcmp(off, "0") == 0) || !v || !*v) return nullptr;
+        std::string s(v);
+        const size_t scheme = s.find("://");
+        const std::string kind = scheme == std::string::npos ? "" : s.substr(0, scheme);
+        if (kind != "socks5" && kind != "socks5h" && kind != "socks") {
+            std::fprintf(stderr, "[win.apk] WINAPK_PROXY ignored by native sockets, expected socks5://host:port\n");
+            return nullptr;
+        }
+        s.erase(0, scheme + 3);
+        while (!s.empty() && (s.back() == '/' || s.back() == ' ')) s.pop_back();
+        auto* c = new ProxyConfig;
+        if (const size_t at = s.rfind('@'); at != std::string::npos) {
+            const std::string cred = s.substr(0, at);
+            const size_t colon = cred.find(':');
+            c->user = cred.substr(0, colon);
+            if (colon != std::string::npos) c->password = cred.substr(colon + 1);
+            s.erase(0, at + 1);
+        }
+        std::string host, port;
+        if (!s.empty() && s[0] == '[') {  // [IPv6]:port
+            const size_t close = s.find(']');
+            if (close != std::string::npos && close + 1 < s.size() && s[close + 1] == ':') {
+                host = s.substr(1, close - 1);
+                port = s.substr(close + 2);
+            }
+        } else if (const size_t colon = s.rfind(':'); colon != std::string::npos) {
+            host = s.substr(0, colon);
+            port = s.substr(colon + 1);
+        }
+        winsock_init();
+        ADDRINFOA hints{};
+        hints.ai_socktype = SOCK_STREAM;
+        ADDRINFOA* list = nullptr;
+        if (host.empty() || port.empty() || ::getaddrinfo(host.c_str(), port.c_str(), &hints, &list) != 0 || !list) {
+            std::fprintf(stderr, "[win.apk] WINAPK_PROXY ignored by native sockets: cannot resolve its host:port\n");
+            delete c;
+            return nullptr;
+        }
+        std::memcpy(&c->addr, list->ai_addr, list->ai_addrlen);
+        c->addr_len = static_cast<int>(list->ai_addrlen);
+        freeaddrinfo(list);
+        std::fprintf(stderr, "[win.apk] native TCP connects go through the SOCKS5 proxy %s:%s\n", host.c_str(),
+                     port.c_str());
+        return c;
+    }();
+    return config;
+}
+
+// A destination as SOCKS5 names it: IPv4 (a v4-mapped IPv6 address included) or
+// IPv6, and the port in network order.
+struct Target {
+    bool v4;
+    uint8_t ip[16];
+    uint16_t port;
+};
+bool target_of(const sockaddr_storage& a, Target* t) {
+    if (a.ss_family == AF_INET) {
+        const auto& s = reinterpret_cast<const sockaddr_in&>(a);
+        t->v4 = true;
+        std::memcpy(t->ip, &s.sin_addr, 4);
+        t->port = s.sin_port;
+        return true;
+    }
+    if (a.ss_family == AF_INET6) {
+        const auto& s = reinterpret_cast<const sockaddr_in6&>(a);
+        static const uint8_t kMapped[12] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF};
+        t->v4 = std::memcmp(s.sin6_addr.s6_addr, kMapped, 12) == 0;
+        std::memcpy(t->ip, s.sin6_addr.s6_addr + (t->v4 ? 12 : 0), t->v4 ? 4 : 16);
+        t->port = s.sin6_port;
+        return true;
+    }
+    return false;
+}
+// This machine, the LAN, link-local and multicast: never through the proxy.
+bool is_local(const Target& t) {
+    const uint8_t* b = t.ip;
+    if (t.v4) {
+        return b[0] == 127 || b[0] == 0 || b[0] == 10 || (b[0] == 172 && (b[1] & 0xF0) == 16) ||
+               (b[0] == 192 && b[1] == 168) || (b[0] == 169 && b[1] == 254) || b[0] >= 224;
+    }
+    static const uint8_t kZero[15] = {};
+    return (std::memcmp(b, kZero, 15) == 0 && b[15] <= 1) ||  // :: and ::1
+           (b[0] & 0xFE) == 0xFC || (b[0] == 0xFE && (b[1] & 0xC0) == 0x80) || b[0] == 0xFF;
+}
+std::string describe(const Target& t) {
+    char ip[64] = "?";
+    ::inet_ntop(t.v4 ? AF_INET : AF_INET6, t.ip, ip, sizeof(ip));
+    return (t.v4 ? std::string(ip) : "[" + std::string(ip) + "]") + ":" + std::to_string(ntohs(t.port));
+}
+
+constexpr ULONGLONG kProxyTimeoutMs = 75000;
+using Abandoned = std::function<bool()>;
+
+// Waits until `h` is readable (or writable) or `deadline` passes: 0, or a Linux
+// errno. Short waits, so a handshake whose socket the guest closed ends early.
+int wait_socket(SOCKET h, bool write, ULONGLONG deadline, const Abandoned& abandoned) {
+    for (;;) {
+        const ULONGLONG now = GetTickCount64();
+        if (now >= deadline) return kETIMEDOUT;
+        if (abandoned()) return 125;  // ECANCELED
+        fd_set ready, failed;
+        FD_ZERO(&ready);
+        FD_ZERO(&failed);
+        FD_SET(h, &ready);
+        FD_SET(h, &failed);
+        timeval tv{0, static_cast<long>(std::min<ULONGLONG>(deadline - now, 200) * 1000)};
+        const int r = ::select(0, write ? nullptr : &ready, write ? &ready : nullptr, &failed, &tv);
+        if (r == SOCKET_ERROR) return linux_from_wsa(WSAGetLastError());
+        if (r == 0) continue;
+        if (FD_ISSET(h, &failed)) {  // a failed connect
+            int e = 0, el = sizeof(e);
+            getsockopt(h, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&e), &el);
+            return e ? linux_from_wsa(e) : 111;  // ECONNREFUSED
+        }
+        return 0;
+    }
+}
+int send_all(SOCKET h, const uint8_t* p, size_t n, ULONGLONG deadline, const Abandoned& abandoned) {
+    while (n) {
+        const int r = ::send(h, reinterpret_cast<const char*>(p), static_cast<int>(n), 0);
+        if (r > 0) {
+            p += r;
+            n -= static_cast<size_t>(r);
+            continue;
+        }
+        if (WSAGetLastError() != WSAEWOULDBLOCK) return linux_from_wsa(WSAGetLastError());
+        if (const int e = wait_socket(h, true, deadline, abandoned)) return e;
+    }
+    return 0;
+}
+int recv_exact(SOCKET h, uint8_t* p, size_t n, ULONGLONG deadline, const Abandoned& abandoned) {
+    while (n) {
+        if (const int e = wait_socket(h, false, deadline, abandoned)) return e;
+        const int r = ::recv(h, reinterpret_cast<char*>(p), static_cast<int>(n), 0);
+        if (r > 0) {
+            p += r;
+            n -= static_cast<size_t>(r);
+            continue;
+        }
+        if (r == 0) return 104;  // ECONNRESET: the proxy hung up
+        if (WSAGetLastError() != WSAEWOULDBLOCK) return linux_from_wsa(WSAGetLastError());
+    }
+    return 0;
+}
+
+// Connects `h` to the proxy at `via` and has it open a stream to `t`; 0 when the
+// stream reaches `t`, else a Linux errno. Works on blocking and non-blocking
+// sockets alike, reading no byte past the proxy's reply.
+int socks5_connect(SOCKET h, const ProxyConfig& p, const sockaddr_storage& via, int via_len, const Target& t,
+                   const Abandoned& abandoned) {
+    const ULONGLONG deadline = GetTickCount64() + kProxyTimeoutMs;
+    if (::connect(h, reinterpret_cast<const sockaddr*>(&via), via_len) != 0) {
+        if (WSAGetLastError() != WSAEWOULDBLOCK) return linux_from_wsa(WSAGetLastError());
+        if (const int e = wait_socket(h, true, deadline, abandoned)) return e;
+        int e = 0, el = sizeof(e);
+        getsockopt(h, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&e), &el);
+        if (e) return linux_from_wsa(e);
+    }
+    constexpr int kEPROTO = 71;
+    const bool auth = !p.user.empty();
+    uint8_t b[520];
+    const uint8_t hello[] = {5, static_cast<uint8_t>(auth ? 2 : 1), 0, 2};  // no auth, user/password
+    if (const int e = send_all(h, hello, auth ? 4 : 3, deadline, abandoned)) return e;
+    if (const int e = recv_exact(h, b, 2, deadline, abandoned)) return e;
+    if (b[0] != 5) return kEPROTO;
+    if (b[1] == 2 && auth) {  // RFC 1929
+        const size_t ul = std::min<size_t>(p.user.size(), 255), pl = std::min<size_t>(p.password.size(), 255);
+        size_t n = 0;
+        b[n++] = 1;
+        b[n++] = static_cast<uint8_t>(ul);
+        std::memcpy(b + n, p.user.data(), ul);
+        n += ul;
+        b[n++] = static_cast<uint8_t>(pl);
+        std::memcpy(b + n, p.password.data(), pl);
+        n += pl;
+        if (const int e = send_all(h, b, n, deadline, abandoned)) return e;
+        if (const int e = recv_exact(h, b, 2, deadline, abandoned)) return e;
+        if (b[1] != 0) return kEACCES;
+    } else if (b[1] != 0) {
+        return kEACCES;  // no method both sides accept
+    }
+    size_t n = 0;
+    b[n++] = 5;
+    b[n++] = 1;  // CONNECT
+    b[n++] = 0;
+    b[n++] = t.v4 ? 1 : 4;
+    std::memcpy(b + n, t.ip, t.v4 ? 4 : 16);
+    n += t.v4 ? 4 : 16;
+    std::memcpy(b + n, &t.port, 2);
+    n += 2;
+    if (const int e = send_all(h, b, n, deadline, abandoned)) return e;
+    if (const int e = recv_exact(h, b, 4, deadline, abandoned)) return e;
+    if (b[0] != 5) return kEPROTO;
+    switch (b[1]) {
+        case 0: break;
+        case 2: return kEACCES;            // not allowed by the ruleset
+        case 3: return 101;                // ENETUNREACH
+        case 4: return 113;                // EHOSTUNREACH
+        case 6: return kETIMEDOUT;         // TTL expired
+        default: return 111;               // ECONNREFUSED (refused, general failure, ...)
+    }
+    size_t bound = b[3] == 1 ? 4 + 2 : b[3] == 4 ? 16 + 2 : 0;  // the proxy's bound address, skipped
+    if (b[3] == 3) {
+        if (const int e = recv_exact(h, b, 1, deadline, abandoned)) return e;
+        bound = b[0] + 2u;
+    }
+    if (!bound) return kEPROTO;
+    if (const int e = recv_exact(h, b, bound, deadline, abandoned)) return e;
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true)) std::fprintf(stderr, "[win.apk] proxy: first native connect through it reached %s\n", describe(t).c_str());
+    return 0;
+}
+
 // ---- the descriptor object ------------------------------------------------------------
 class Socket final : public FdObject {
 public:
@@ -119,9 +352,22 @@ public:
     ~Socket() override { closesocket(s_); }
     SOCKET handle() const { return s_; }
 
+    // A stream connect() sent through the per-app proxy runs the SOCKS5 handshake
+    // first; until it is done the stream is not the guest's.
+    enum ProxyState { kDirect, kHandshaking, kProxied, kProxyFailed };
+    std::atomic<int> proxy_state{kDirect};
+    std::atomic<int> proxy_error{0};  // a failed handshake's errno, until SO_ERROR reads it
+    sockaddr_storage proxy_peer{};    // the destination, for getpeername
+    int proxy_peer_len = 0;
+
     int64_t read(void* buf, size_t n) override { return recv_flags(buf, n, 0); }
     int64_t write(const void* buf, size_t n) override { return send_flags(buf, n, 0); }
     short ready(short events) override {
+        switch (proxy_state.load()) {
+            case kHandshaking: return 0;
+            case kProxyFailed: return static_cast<short>(0x8 | 0x10 | (events & 0x5));  // as a refused connect
+            default: break;
+        }
         WSAPOLLFD p{s_, 0, 0};
         if (events & 0x1) p.events |= POLLRDNORM;
         if (events & 0x4) p.events |= POLLWRNORM;
@@ -142,6 +388,10 @@ public:
     }
     int ioctl(int request, void* arg) override {
         if (request == 0x541B) {  // FIONREAD
+            if (proxy_state.load() == kHandshaking) {  // the proxy's reply is not the guest's
+                *static_cast<int*>(arg) = 0;
+                return 0;
+            }
             u_long n = 0;
             if (ioctlsocket(s_, FIONREAD, &n) != 0) return fail_wsa();
             *static_cast<int*>(arg) = static_cast<int>(n);
@@ -150,8 +400,14 @@ public:
         return FdObject::ioctl(request, arg);
     }
 
-    // MSG_DONTWAIT (0x40) on a blocking socket: answer EAGAIN unless ready.
+    // True (errno set) when a send/recv cannot go ahead: during a proxy
+    // handshake (EAGAIN) or after it failed (ENOTCONN), and for MSG_DONTWAIT
+    // (0x40) on a blocking socket that is not ready (EAGAIN).
     bool would_block(int flags, short want) {
+        if (const int ps = proxy_state.load(); ps == kHandshaking || ps == kProxyFailed) {
+            *guest_errno() = ps == kHandshaking ? kEAGAIN : 107;  // ENOTCONN
+            return true;
+        }
         if (!(flags & 0x40) || nonblocking) return false;
         if (ready(want) & (want | 0x18)) return false;
         *guest_errno() = kEAGAIN;
@@ -270,6 +526,63 @@ WINAPK_GUEST_ABI int g_accept4(int fd, void* addr, uint32_t* len, int flags) {
     return install(c, flags);
 }
 WINAPK_GUEST_ABI int g_accept(int fd, void* addr, uint32_t* len) { return g_accept4(fd, addr, len, 0); }
+
+// connect() through the per-app proxy when `dest` should go there; false leaves
+// the connect to the caller. A non-blocking socket gets EINPROGRESS and the
+// handshake runs on a thread, as a direct connect would run in the kernel.
+bool proxy_connect(const std::shared_ptr<Socket>& s, const ProxyConfig& p, const sockaddr_storage& dest, int dest_len,
+                   int* result) {
+    Target t, pt;
+    int type = 0, tl = sizeof(type);
+    if (!target_of(dest, &t) || is_local(t) || !target_of(p.addr, &pt) ||
+        (t.v4 == pt.v4 && t.port == pt.port && std::memcmp(t.ip, pt.ip, t.v4 ? 4 : 16) == 0) ||
+        getsockopt(s->handle(), SOL_SOCKET, SO_TYPE, reinterpret_cast<char*>(&type), &tl) != 0 || type != SOCK_STREAM) {
+        return false;
+    }
+    // The socket has the destination's family; an IPv6 one reaches an IPv4 proxy dual-stack.
+    sockaddr_storage via = p.addr;
+    int via_len = p.addr_len;
+    if (dest.ss_family != via.ss_family) {
+        if (dest.ss_family != AF_INET6) return false;  // an IPv4 socket cannot reach an IPv6 proxy
+        DWORD off = 0;
+        setsockopt(s->handle(), IPPROTO_IPV6, IPV6_V6ONLY, reinterpret_cast<const char*>(&off), sizeof(off));
+        sockaddr_in6 m{};
+        m.sin6_family = AF_INET6;
+        m.sin6_port = pt.port;
+        m.sin6_addr.s6_addr[10] = m.sin6_addr.s6_addr[11] = 0xFF;
+        std::memcpy(m.sin6_addr.s6_addr + 12, pt.ip, 4);
+        via = {};
+        std::memcpy(&via, &m, sizeof(m));
+        via_len = sizeof(m);
+    }
+    std::memcpy(&s->proxy_peer, &dest, static_cast<size_t>(dest_len));
+    s->proxy_peer_len = dest_len;
+    s->proxy_state = Socket::kHandshaking;
+    if (!s->nonblocking) {
+        const int e = socks5_connect(s->handle(), p, via, via_len, t, [] { return false; });
+        s->proxy_state = e ? Socket::kProxyFailed : Socket::kProxied;
+        if (e) {
+            std::fprintf(stderr, "[win.apk] proxy: connect to %s failed (errno %d)\n", describe(t).c_str(), e);
+            *guest_errno() = e;
+        }
+        *result = e ? -1 : 0;
+        return true;
+    }
+    std::thread([s, &p, via, via_len, t] {
+        // Only this thread still holding the socket: the guest closed it.
+        const int e = socks5_connect(s->handle(), p, via, via_len, t, [&s] { return s.use_count() == 1; });
+        if (e) {
+            if (e != 125) std::fprintf(stderr, "[win.apk] proxy: connect to %s failed (errno %d)\n", describe(t).c_str(), e);
+            s->proxy_error = e;
+        }
+        s->proxy_state = e ? Socket::kProxyFailed : Socket::kProxied;
+        fd_notify();
+    }).detach();
+    *guest_errno() = 115;  // EINPROGRESS
+    *result = -1;
+    return true;
+}
+
 WINAPK_GUEST_ABI int g_connect(int fd, const void* addr, uint32_t len) {
     auto s = socket_of(fd);
     sockaddr_storage h;
@@ -279,6 +592,14 @@ WINAPK_GUEST_ABI int g_connect(int fd, const void* addr, uint32_t len) {
         *guest_errno() = kEINVAL;
         return -1;
     }
+    if (const int ps = s->proxy_state.load(); ps != Socket::kDirect) {
+        // connect() again on a proxied stream: EALREADY, EISCONN, or the failure once
+        const int e = ps == Socket::kProxyFailed ? s->proxy_error.exchange(0) : 0;
+        *guest_errno() = ps == Socket::kHandshaking ? 114 : ps == Socket::kProxied ? 106 : e ? e : 103;
+        return -1;
+    }
+    int proxied = 0;
+    if (const ProxyConfig* p = proxy_config(); p && proxy_connect(s, *p, h, hl, &proxied)) return proxied;
     if (::connect(s->handle(), reinterpret_cast<sockaddr*>(&h), hl) == 0) return 0;
     // A non-blocking connect in progress is EINPROGRESS on Linux.
     if (WSAGetLastError() == WSAEWOULDBLOCK) {
@@ -398,6 +719,16 @@ WINAPK_GUEST_ABI int g_getsockname(int fd, void* addr, uint32_t* len) {
 WINAPK_GUEST_ABI int g_getpeername(int fd, void* addr, uint32_t* len) {
     auto s = socket_of(fd);
     if (!s) return -1;
+    switch (s->proxy_state.load()) {
+        case Socket::kProxied:  // the destination, not the proxy
+            to_guest(s->proxy_peer, s->proxy_peer_len, addr, len);
+            return 0;
+        case Socket::kHandshaking:
+        case Socket::kProxyFailed:
+            *guest_errno() = 107;  // ENOTCONN
+            return -1;
+        default: break;
+    }
     sockaddr_storage h{};
     int hl = sizeof(h);
     if (getpeername(s->handle(), reinterpret_cast<sockaddr*>(&h), &hl) != 0) return fail_wsa();
@@ -462,6 +793,11 @@ WINAPK_GUEST_ABI int g_setsockopt(int fd, int level, int name, const void* value
 WINAPK_GUEST_ABI int g_getsockopt(int fd, int level, int name, void* value, uint32_t* len) {
     auto s = socket_of(fd);
     if (!s) return -1;
+    if (level == 1 && name == 4 && s->proxy_state.load() == Socket::kProxyFailed && *len >= 4) {
+        *static_cast<int*>(value) = s->proxy_error.exchange(0);  // SO_ERROR of the handshake, read once
+        *len = 4;
+        return 0;
+    }
     const Option* o = find_option(level, name);
     if (!o) {
         *guest_errno() = 92;  // ENOPROTOOPT
